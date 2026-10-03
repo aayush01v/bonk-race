@@ -4,12 +4,13 @@
   "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
-      "label": "Sim Race Game Launcher",
+      "label": "Bonk Race Multiplayer",
       "onAutoForward": "openBrowser",
       "visibility": "public"
     }
   },
-  "postStartCommand": "nohup python3 -m http.server 8000 > /tmp/game-server.log 2>&1 &",
+  "postCreateCommand": "npm install",
+  "postStartCommand": "nohup node mp-server.js > /tmp/game-server.log 2>&1 &",
   "customizations": {
     "vscode": {
       "settings": {

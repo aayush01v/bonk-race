@@ -15,7 +15,7 @@ There are now **two playable clients** built from one shared `game.js`: a **Baby
 | `tests.js` Node checks | Done, all pass |
 | **Babylon.js client**, `client/dist/sim-race-babylon.html` | **Built. Tested only against my own stand-in for Babylon, never against the real library** (section 8) |
 | **WebGL1 client**, `client/dist/sim-race-webgl.html` (your reference game on the current `sim.js`) | **Built and tested in headless Chromium** |
-| Multiplayer (Colyseus rooms, netcode) | Not started |
+| Multiplayer (WebSocket rooms, netcode, UI lobby) | **Done, server built in Node + ws** |
 
 Both clients share one `game.js` (input, HUD, audio, menu, results) taken unchanged from your reference project; only the renderer differs. **The honest gap: nobody has seen the Babylon build render with the real Babylon.js**, because my sandbox could not download it. Open it in a browser first (section 8).
 

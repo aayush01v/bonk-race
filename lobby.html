@@ -1,0 +1,931 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Bonk Race — Multiplayer Lobby</title>
+<style>
+:root {
+  --ink: #2a1a5e; --pink: #ff8fb8; --lilac: #b79cff; --yellow: #ffd23f;
+  --mint: #6fe3b8; --sky: #8bd3ff; --coral: #ff7a59; --paper: #fffdf7;
+  --orange: #ffb86b; --danger: #ff3d6e;
+  --font: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", Nunito, "Trebuchet MS", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; min-height: 100vh;
+  background: linear-gradient(135deg, #1a0e3e 0%, #2a1a5e 35%, #3d2477 70%, #1a0e3e 100%);
+  font-family: var(--font); color: var(--paper);
+  overflow-x: hidden;
+}
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(255,143,184,0.12) 0%, transparent 40%),
+    radial-gradient(circle at 80% 70%, rgba(111,227,184,0.10) 0%, transparent 40%),
+    radial-gradient(circle at 50% 10%, rgba(255,210,63,0.08) 0%, transparent 50%);
+}
+body { padding: 20px 16px 48px; display: flex; flex-direction: column; align-items: center; position: relative; }
+
+/* Outlined text */
+.outline { --o:3px; text-shadow:
+  var(--o) 0 0 var(--ink), calc(-1*var(--o)) 0 0 var(--ink), 0 var(--o) 0 var(--ink), 0 calc(-1*var(--o)) 0 var(--ink),
+  var(--o) var(--o) 0 var(--ink), calc(-1*var(--o)) var(--o) 0 var(--ink),
+  var(--o) calc(-1*var(--o)) 0 var(--ink), calc(-1*var(--o)) calc(-1*var(--o)) 0 var(--ink),
+  0 calc(var(--o)*2.2) 0 var(--ink); }
+
+/* Container */
+.container { width: 100%; max-width: 800px; display: flex; flex-direction: column; gap: 20px; }
+
+/* Title */
+#title { margin: 0; font-size: clamp(36px, 10vw, 64px); line-height: 0.95; font-weight: 900;
+  letter-spacing: -0.02em; text-align: center; white-space: nowrap; }
+#title span { display: inline-block; color: var(--c); transform: rotate(var(--r)); --o: 4px;
+  transition: transform 0.2s cubic-bezier(0.34,1.56,0.64,1); cursor: default; }
+#title span:hover { transform: translateY(-6px) scale(1.12) rotate(calc(var(--r)*1.5)); }
+#title span.gap { width: .22em; }
+.subtitle { text-align: center; font-size: 16px; font-weight: 800; color: var(--lilac); margin: -4px 0 8px; }
+
+/* Panels */
+.panel {
+  background: rgba(255,253,247,0.06); border: 2px solid rgba(255,253,247,0.15);
+  border-radius: 20px; padding: 24px; backdrop-filter: blur(12px);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+}
+.panel-title { margin: 0 0 16px; font-size: 22px; font-weight: 900; display: flex;
+  align-items: center; gap: 10px; }
+.panel-title .emoji { font-size: 28px; }
+
+/* Inputs */
+input[type="text"], input[type="number"], select {
+  font: 800 16px var(--font); padding: 12px 16px;
+  background: rgba(255,253,247,0.1); border: 2px solid rgba(255,253,247,0.2);
+  border-radius: 14px; color: var(--paper); outline: none;
+  transition: border-color 0.2s, background 0.2s;
+}
+input:focus, select:focus {
+  border-color: var(--yellow); background: rgba(255,210,63,0.08);
+}
+input::placeholder { color: rgba(255,253,247,0.4); }
+select { cursor: pointer; }
+select option { background: #2a1a5e; color: var(--paper); }
+label { font-size: 13px; font-weight: 800; color: var(--lilac); display: block; margin-bottom: 5px; }
+
+/* Buttons */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font: 900 18px var(--font); padding: 14px 28px; border-radius: 999px;
+  border: 3px solid var(--ink); color: var(--ink); cursor: pointer;
+  box-shadow: 0 6px 0 var(--ink); transition: transform 0.1s, box-shadow 0.1s;
+  text-decoration: none; text-align: center; white-space: nowrap;
+}
+.btn:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--ink); }
+.btn-yellow { background: var(--yellow); }
+.btn-yellow:hover { background: #ffe066; }
+.btn-mint { background: var(--mint); }
+.btn-mint:hover { background: #8ef7c7; }
+.btn-pink { background: var(--pink); }
+.btn-pink:hover { background: #ffb3d0; }
+.btn-coral { background: var(--coral); }
+.btn-coral:hover { background: #ff9a7f; }
+.btn-lilac { background: var(--lilac); }
+.btn-lilac:hover { background: #ccb8ff; }
+.btn-small { font-size: 14px; padding: 8px 16px; box-shadow: 0 4px 0 var(--ink); }
+.btn-small:active { transform: translateY(3px); box-shadow: 0 1px 0 var(--ink); }
+.btn-outline { background: transparent; color: var(--paper); border-color: rgba(255,253,247,0.3); box-shadow: 0 4px 0 rgba(0,0,0,0.3); }
+.btn-outline:hover { background: rgba(255,253,247,0.08); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Connection badge */
+.conn-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 800;
+  background: rgba(0,0,0,0.3); border: 1.5px solid rgba(255,253,247,0.15);
+}
+.conn-dot { width: 8px; height: 8px; border-radius: 50%; }
+.conn-dot.on { background: #10b981; box-shadow: 0 0 8px #10b981; animation: pulse 1.8s infinite; }
+.conn-dot.off { background: #ef4444; }
+.conn-dot.connecting { background: var(--yellow); animation: pulse 0.8s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.6; transform:scale(1.3); } }
+
+/* Screens */
+.screen { display: none; width: 100%; }
+.screen.active { display: flex; flex-direction: column; gap: 20px; }
+
+/* Main menu grid */
+.menu-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 520px) { .menu-grid { grid-template-columns: 1fr; } }
+.menu-card {
+  background: rgba(255,253,247,0.06); border: 2px solid rgba(255,253,247,0.12);
+  border-radius: 20px; padding: 28px 24px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+  transition: transform 0.15s, border-color 0.2s;
+}
+.menu-card:hover { transform: translateY(-2px); border-color: rgba(255,253,247,0.25); }
+.menu-card .icon { font-size: 48px; }
+.menu-card h3 { margin: 0; font-size: 20px; }
+.menu-card p { margin: 0; font-size: 13px; color: var(--lilac); font-weight: 700; }
+
+/* Name & character setup */
+.setup-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.setup-row .field { flex: 1; min-width: 140px; }
+.setup-row input { width: 100%; }
+
+/* Character picker */
+.picker { display: flex; gap: 10px; flex-wrap: wrap; padding: 4px 0; }
+.chip {
+  position: relative; width: 52px; height: 52px; border-radius: 50%;
+  border: 3px solid var(--ink); background: var(--c); box-shadow: 0 5px 0 var(--ink);
+  cursor: pointer; padding: 0; transition: transform 0.12s;
+}
+.chip::before, .chip::after {
+  content: ''; position: absolute; top: 17px; width: 10px; height: 12px;
+  border-radius: 50%; background: #fff; border: 2px solid var(--ink);
+}
+.chip::before { left: 10px; } .chip::after { right: 10px; }
+.chip.selected { transform: translateY(-5px) scale(1.1);
+  box-shadow: 0 0 0 3px #fff, 0 0 0 6px var(--ink), 0 10px 0 6px var(--ink); }
+.pick-name { font-weight: 900; font-size: 16px; color: var(--yellow); min-height: 1.2em; }
+
+/* Room code display */
+.room-code {
+  display: flex; align-items: center; gap: 12px; padding: 12px 20px;
+  background: rgba(255,210,63,0.1); border: 2px solid rgba(255,210,63,0.3);
+  border-radius: 16px;
+}
+.room-code .code {
+  font: 900 32px var(--font); letter-spacing: 0.15em; color: var(--yellow);
+}
+.room-code .label { font-size: 12px; font-weight: 800; color: var(--lilac); }
+
+/* Player list */
+.player-list { display: flex; flex-direction: column; gap: 8px; }
+.player-row {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  background: rgba(255,253,247,0.06); border: 1.5px solid rgba(255,253,247,0.1);
+  border-radius: 14px; transition: background 0.15s;
+}
+.player-row:hover { background: rgba(255,253,247,0.1); }
+.player-avatar {
+  width: 36px; height: 36px; border-radius: 50%; border: 2.5px solid var(--ink);
+  flex-shrink: 0;
+}
+.player-name { font-weight: 800; font-size: 15px; flex: 1; }
+.player-badge {
+  font-size: 11px; font-weight: 800; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 999px; border: 1.5px solid var(--ink);
+}
+.badge-host { background: var(--yellow); color: var(--ink); }
+.badge-you { background: var(--mint); color: var(--ink); }
+
+/* Settings grid */
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 480px) { .settings-grid { grid-template-columns: 1fr; } }
+.setting-card {
+  background: rgba(255,253,247,0.04); border: 1.5px solid rgba(255,253,247,0.1);
+  border-radius: 14px; padding: 12px 14px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.setting-card label { margin: 0; }
+.setting-card input, .setting-card select { width: 100%; }
+
+/* Share box */
+.share-box {
+  display: flex; gap: 8px; align-items: center;
+  background: rgba(0,0,0,0.2); border: 1.5px solid rgba(255,253,247,0.1);
+  border-radius: 14px; padding: 10px 14px;
+}
+.share-box input { flex: 1; font-size: 14px; }
+.share-box button { flex-shrink: 0; }
+
+/* Toast */
+.toast {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(100px);
+  background: var(--ink); color: var(--paper); font: 800 14px var(--font);
+  padding: 12px 24px; border-radius: 999px; border: 2px solid rgba(255,253,247,0.2);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 100;
+  transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s;
+  opacity: 0; pointer-events: none;
+}
+.toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+/* Results overlay */
+.results-overlay {
+  position: fixed; inset: 0; background: rgba(26,14,62,0.85); backdrop-filter: blur(8px);
+  display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+}
+.results-overlay.active { display: flex; }
+.results-card {
+  background: var(--paper); color: var(--ink); border: 4px solid var(--ink);
+  border-radius: 24px; padding: 28px; max-width: 480px; width: 100%;
+  box-shadow: 0 12px 0 var(--ink); text-align: center;
+}
+.results-card h2 { margin: 0 0 4px; font-size: 28px; }
+.results-card .sub { color: #666; font-weight: 700; font-size: 14px; margin: 0 0 16px; }
+.results-list { list-style: none; padding: 0; margin: 0 0 16px; text-align: left; }
+.results-list li {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-radius: 12px; font-weight: 800; font-size: 14px;
+}
+.results-list li:nth-child(odd) { background: rgba(42,26,94,0.06); }
+.results-list li .rank { width: 24px; text-align: center; font-size: 18px; }
+.results-list li .r-avatar { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--ink); flex-shrink: 0; }
+.results-list li .r-name { flex: 1; }
+.results-list li .r-time { color: #666; font-weight: 700; }
+.results-btns { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+
+/* Error modal */
+.error-toast {
+  background: var(--danger); color: #fff; border-color: rgba(255,255,255,0.3);
+}
+
+/* Waiting dots animation */
+.waiting-dots::after {
+  content: ''; animation: dots 1.4s steps(4, end) infinite;
+}
+@keyframes dots {
+  0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; }
+}
+
+/* Floating particles */
+.bg-particles { position: fixed; inset: 0; pointer-events: none; z-index: -1; overflow: hidden; }
+.bg-particles span {
+  position: absolute; display: block; border-radius: 50%;
+  animation: float linear infinite;
+}
+@keyframes float {
+  0% { transform: translateY(100vh) rotate(0deg); opacity: 0.6; }
+  100% { transform: translateY(-10vh) rotate(720deg); opacity: 0; }
+}
+</style>
+</head>
+<body>
+
+<div class="bg-particles" id="bgParticles"></div>
+
+<div class="container">
+
+  <!-- Header -->
+  <header style="text-align:center;">
+    <h1 id="title" class="outline" aria-label="Bonk Race">
+      <span style="--c:#ff8fb8;--r:-5deg">B</span><span style="--c:#ffd23f;--r:4deg">O</span><span style="--c:#6fe3b8;--r:-3deg">N</span><span style="--c:#ff7a59;--r:5deg">K</span><span class="gap"></span><span style="--c:#b79cff;--r:3deg">R</span><span style="--c:#8bd3ff;--r:-4deg">A</span><span style="--c:#ffd23f;--r:2deg">C</span><span style="--c:#ff8fb8;--r:-3deg">E</span>
+    </h1>
+    <p class="subtitle">⚡ Multiplayer Lobby</p>
+    <div class="conn-badge" id="connBadge">
+      <span class="conn-dot connecting" id="connDot"></span>
+      <span id="connText">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- ═══ SCREEN: Main Menu ═══ -->
+  <div id="screenMenu" class="screen active">
+    <div class="panel">
+      <div class="panel-title"><span class="emoji">👤</span> Your Racer</div>
+      <div class="setup-row" style="margin-bottom:14px;">
+        <div class="field">
+          <label>Nickname</label>
+          <input type="text" id="inputName" placeholder="Enter your name…" maxlength="20" value="">
+        </div>
+      </div>
+      <label>Character</label>
+      <div class="picker" id="picker"></div>
+      <div class="pick-name" id="pickName"></div>
+    </div>
+
+    <div class="menu-grid">
+      <div class="menu-card">
+        <div class="icon">🏠</div>
+        <h3>Create Room</h3>
+        <p>Host a match, set the rules, invite friends</p>
+        <button class="btn btn-yellow" id="btnCreate">Create Room</button>
+      </div>
+      <div class="menu-card">
+        <div class="icon">🚪</div>
+        <h3>Join Room</h3>
+        <p>Enter a room code to join a friend's game</p>
+        <div style="display:flex;gap:8px;width:100%;">
+          <input type="text" id="inputCode" placeholder="ROOM CODE" maxlength="5"
+            style="flex:1;text-align:center;text-transform:uppercase;letter-spacing:0.15em;font-size:20px;font-weight:900;">
+          <button class="btn btn-mint btn-small" id="btnJoin">Join</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Room browser -->
+    <div class="panel" id="browserPanel" style="display:none;">
+      <div class="panel-title"><span class="emoji">🌐</span> Open Rooms</div>
+      <div id="roomList" style="font-size:14px;font-weight:700;color:var(--lilac);">Searching…</div>
+    </div>
+
+    <div style="text-align:center;">
+      <a href="/index.html" class="btn btn-outline btn-small">← Back to Solo Play</a>
+    </div>
+  </div>
+
+  <!-- ═══ SCREEN: Room Lobby ═══ -->
+  <div id="screenRoom" class="screen">
+    <div class="panel">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+        <div>
+          <div class="panel-title" style="margin:0;"><span class="emoji">🏠</span> Room Lobby</div>
+          <div style="font-size:13px;font-weight:700;color:var(--lilac);margin-top:2px;" id="roomStateText">Waiting for host to start…</div>
+        </div>
+        <div class="room-code">
+          <div>
+            <div class="label">Room Code</div>
+            <div class="code" id="displayCode">-----</div>
+          </div>
+          <button class="btn btn-small btn-outline" id="btnCopyCode">📋 Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Share link -->
+    <div class="share-box">
+      <input type="text" id="shareLink" readonly style="font-size:13px;">
+      <button class="btn btn-small btn-lilac" id="btnShareCopy">📋 Copy Link</button>
+    </div>
+
+    <!-- Player list -->
+    <div class="panel">
+      <div class="panel-title"><span class="emoji">👥</span> Players <span id="playerCount" style="color:var(--lilac);font-size:14px;">(0/6)</span></div>
+      <div class="player-list" id="playerList"></div>
+    </div>
+
+    <!-- Host settings -->
+    <div class="panel" id="settingsPanel">
+      <div class="panel-title"><span class="emoji">⚙️</span> Match Settings <span style="font-size:12px;color:var(--yellow);font-weight:700;">(HOST ONLY)</span></div>
+      <div class="settings-grid">
+        <div class="setting-card">
+          <label>Max Players</label>
+          <select id="setMaxPlayers">
+            <option value="2">2 Players</option>
+            <option value="4">4 Players</option>
+            <option value="6" selected>6 Players</option>
+            <option value="8">8 Players</option>
+          </select>
+        </div>
+        <div class="setting-card">
+          <label>🤖 Bot Count</label>
+          <select id="setBotCount">
+            <option value="0">No Bots</option>
+            <option value="1">1 Bot</option>
+            <option value="2">2 Bots</option>
+            <option value="3">3 Bots</option>
+            <option value="4">4 Bots</option>
+            <option value="5">5 Bots</option>
+          </select>
+        </div>
+        <div class="setting-card">
+          <label>🤖 Bot Difficulty</label>
+          <select id="setBotSkill">
+            <option value="0.5">Easy</option>
+            <option value="0.75" selected>Medium</option>
+            <option value="0.92">Hard</option>
+          </select>
+        </div>
+        <div class="setting-card">
+          <label>🌀 Spinner Speed</label>
+          <select id="setSpinnerSpeed">
+            <option value="0.5">Slow</option>
+            <option value="1.0" selected>Normal</option>
+            <option value="1.5">Fast</option>
+            <option value="2.0">Chaos!</option>
+          </select>
+        </div>
+        <div class="setting-card">
+          <label>🧱 Crumble Hold Time</label>
+          <select id="setCrumbleHold">
+            <option value="0.6">Quick (0.6s)</option>
+            <option value="1.2" selected>Normal (1.2s)</option>
+            <option value="2.0">Generous (2.0s)</option>
+          </select>
+        </div>
+        <div class="setting-card">
+          <label>🚀 Bounce Pad Force</label>
+          <select id="setBounceForce">
+            <option value="12">Weak</option>
+            <option value="17.5" selected>Normal</option>
+            <option value="25">Super</option>
+            <option value="40">TO THE MOON 🌙</option>
+          </select>
+        </div>
+      </div>
+      <div style="text-align:center;margin-top:16px;">
+        <button class="btn btn-yellow" id="btnStartRace" style="font-size:22px;padding:16px 48px;">
+          🏁 START RACE
+        </button>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+      <button class="btn btn-outline btn-small" id="btnLeave">🚪 Leave Room</button>
+    </div>
+  </div>
+
+  <!-- ═══ SCREEN: Racing ═══ -->
+  <div id="screenRacing" class="screen">
+    <div class="panel" style="text-align:center;">
+      <div class="panel-title" style="justify-content:center;"><span class="emoji">🏁</span> Race In Progress!</div>
+      <p style="font-size:14px;font-weight:700;color:var(--lilac);margin:0;">
+        The game is running in a separate window. Switch to it to play!
+      </p>
+      <div style="margin-top:12px;">
+        <button class="btn btn-yellow" id="btnFocusGame">🎮 Open Game Window</button>
+      </div>
+      <div id="raceStatus" style="margin-top:16px;font-size:13px;font-weight:700;color:var(--mint);"></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Results overlay -->
+<div class="results-overlay" id="resultsOverlay">
+  <div class="results-card">
+    <h2 id="resultsTitle" class="outline" style="color:var(--yellow);--o:3px;">Race Results</h2>
+    <p class="sub" id="resultsSub"></p>
+    <ol class="results-list" id="resultsList"></ol>
+    <div class="results-btns">
+      <button class="btn btn-yellow" id="btnPlayAgain">🏁 Race Again</button>
+      <button class="btn btn-outline btn-small" id="btnBackToLobby" style="color:var(--ink);">← Back to Lobby</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+'use strict';
+
+/* ─── DOM refs ─── */
+const $ = id => document.getElementById(id);
+const KINDS = {
+  zombie:  { name: 'Zombie',    c: '#8fd16a' },
+  pumpkin: { name: 'Pumpkin',   c: '#ff9a3d' },
+  ghost:   { name: 'Ghost',     c: '#efe9ff' },
+  robot:   { name: 'Robot',     c: '#8bd3ff' },
+  gum:     { name: 'Bubblegum', c: '#ff8fb8' },
+  banana:  { name: 'Banana',    c: '#ffd23f' },
+};
+const KIND_IDS = Object.keys(KINDS);
+
+/* ─── state ─── */
+let ws = null;
+let myId = null;
+let myName = localStorage.getItem('bonk_name') || '';
+let myKind = localStorage.getItem('bonk_kind') || 'zombie';
+let roomCode = null;
+let isHost = false;
+let lobbyData = null;
+let gameWindow = null;
+
+/* ─── floating particles ─── */
+(function initParticles() {
+  const container = $('bgParticles');
+  const colors = ['#ff8fb8','#ffd23f','#6fe3b8','#b79cff','#8bd3ff','#ff7a59'];
+  for (let i = 0; i < 20; i++) {
+    const span = document.createElement('span');
+    const size = 4 + Math.random() * 8;
+    span.style.cssText = `
+      width:${size}px; height:${size}px; left:${Math.random()*100}%;
+      background:${colors[i%colors.length]}; opacity:${0.2+Math.random()*0.3};
+      animation-duration:${8+Math.random()*12}s; animation-delay:${Math.random()*10}s;
+    `;
+    container.appendChild(span);
+  }
+})();
+
+/* ─── character picker ─── */
+(function initPicker() {
+  const picker = $('picker');
+  KIND_IDS.forEach(id => {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'chip'; btn.dataset.k = id;
+    btn.style.setProperty('--c', KINDS[id].c);
+    btn.setAttribute('aria-label', KINDS[id].name);
+    btn.addEventListener('click', () => pickKind(id));
+    picker.appendChild(btn);
+  });
+  pickKind(myKind);
+})();
+function pickKind(id) {
+  myKind = id;
+  localStorage.setItem('bonk_kind', id);
+  document.querySelectorAll('.chip').forEach(b => b.classList.toggle('selected', b.dataset.k === id));
+  $('pickName').textContent = KINDS[id].name;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'kind', kind: id }));
+  }
+}
+
+/* ─── name input ─── */
+$('inputName').value = myName;
+$('inputName').addEventListener('input', e => {
+  myName = e.target.value.trim();
+  localStorage.setItem('bonk_name', myName);
+});
+
+/* ─── screens ─── */
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  $(id).classList.add('active');
+}
+
+/* ─── toast ─── */
+let toastTimer = null;
+function toast(msg, isError) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (isError ? ' error-toast' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+}
+
+/* ─── WebSocket ─── */
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = `${proto}//${location.host}/ws`;
+  $('connDot').className = 'conn-dot connecting';
+  $('connText').textContent = 'Connecting…';
+
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    $('connDot').className = 'conn-dot on';
+    $('connText').textContent = 'Connected';
+    // identify
+    ws.send(JSON.stringify({ type: 'setName', name: myName || 'Player', kind: myKind }));
+    fetchRooms();
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleMessage(msg);
+  };
+
+  ws.onclose = () => {
+    $('connDot').className = 'conn-dot off';
+    $('connText').textContent = 'Disconnected';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => {};
+}
+
+function handleMessage(msg) {
+  switch (msg.type) {
+    case 'welcome':
+      myId = msg.playerId;
+      break;
+
+    case 'joined':
+      roomCode = msg.code;
+      isHost = msg.isHost;
+      showScreen('screenRoom');
+      $('displayCode').textContent = roomCode;
+      updateShareLink();
+      $('settingsPanel').style.display = isHost ? '' : 'none';
+      toast(isHost ? 'Room created! Share the code with friends.' : 'Joined room ' + roomCode);
+      break;
+
+    case 'lobby':
+      lobbyData = msg;
+      renderLobby(msg);
+      break;
+
+    case 'host':
+      if (msg.you) {
+        isHost = true;
+        $('settingsPanel').style.display = '';
+        toast('You are now the host!');
+      }
+      break;
+
+    case 'raceStart':
+      showScreen('screenRacing');
+      launchGame(msg);
+      break;
+
+    case 'state':
+      // forward to game window
+      if (gameWindow && !gameWindow.closed) {
+        gameWindow.postMessage({ type: 'mp_state', data: msg }, '*');
+      }
+      break;
+
+    case 'events':
+      if (gameWindow && !gameWindow.closed) {
+        gameWindow.postMessage({ type: 'mp_events', data: msg.events }, '*');
+      }
+      break;
+
+    case 'raceEnd':
+      showResults(msg.ranking);
+      break;
+
+    case 'kicked':
+      roomCode = null; isHost = false;
+      showScreen('screenMenu');
+      toast('You were kicked from the room.', true);
+      break;
+
+    case 'error':
+      toast(msg.msg, true);
+      break;
+  }
+}
+
+/* ─── lobby rendering ─── */
+function renderLobby(data) {
+  $('playerCount').textContent = `(${data.players.length}/${data.settings.maxPlayers})`;
+  $('roomStateText').textContent = data.state === 'lobby' ? 'Waiting for host to start…' :
+    data.state === 'results' ? 'Results – host can start a new race' : 'Race in progress';
+
+  // update host status
+  isHost = data.hostId === myId;
+  $('settingsPanel').style.display = isHost ? '' : 'none';
+
+  // player list
+  const list = $('playerList');
+  list.innerHTML = '';
+  data.players.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'player-row';
+
+    const avatar = document.createElement('div');
+    avatar.className = 'player-avatar';
+    avatar.style.background = (KINDS[p.kind] || KINDS.zombie).c;
+
+    const name = document.createElement('div');
+    name.className = 'player-name';
+    name.textContent = p.name;
+
+    row.append(avatar, name);
+
+    if (p.isHost) {
+      const badge = document.createElement('span');
+      badge.className = 'player-badge badge-host';
+      badge.textContent = '👑 Host';
+      row.appendChild(badge);
+    }
+    if (p.id === myId) {
+      const badge = document.createElement('span');
+      badge.className = 'player-badge badge-you';
+      badge.textContent = 'You';
+      row.appendChild(badge);
+    }
+    if (isHost && p.id !== myId) {
+      const kick = document.createElement('button');
+      kick.className = 'btn btn-danger btn-small';
+      kick.textContent = '✖';
+      kick.style.padding = '4px 10px';
+      kick.addEventListener('click', () => {
+        ws.send(JSON.stringify({ type: 'kick', targetId: p.id }));
+      });
+      row.appendChild(kick);
+    }
+
+    list.appendChild(row);
+  });
+
+  // sync settings dropdowns if host
+  if (isHost) {
+    $('setMaxPlayers').value = data.settings.maxPlayers;
+    $('setBotCount').value = data.settings.botCount;
+    $('setBotSkill').value = data.settings.botSkill;
+    $('setSpinnerSpeed').value = data.settings.spinnerSpeed;
+    $('setCrumbleHold').value = data.settings.crumbleHold;
+    $('setBounceForce').value = data.settings.bounceForce;
+  }
+}
+
+/* ─── settings change handlers ─── */
+function sendSettings() {
+  if (!isHost) return;
+  ws.send(JSON.stringify({
+    type: 'settings',
+    settings: {
+      maxPlayers: parseInt($('setMaxPlayers').value),
+      botCount: parseInt($('setBotCount').value),
+      botSkill: parseFloat($('setBotSkill').value),
+      spinnerSpeed: parseFloat($('setSpinnerSpeed').value),
+      crumbleHold: parseFloat($('setCrumbleHold').value),
+      bounceForce: parseFloat($('setBounceForce').value),
+    }
+  }));
+}
+['setMaxPlayers','setBotCount','setBotSkill','setSpinnerSpeed','setCrumbleHold','setBounceForce']
+  .forEach(id => $(id).addEventListener('change', sendSettings));
+
+/* ─── share link ─── */
+function updateShareLink() {
+  const base = location.origin + '/lobby.html';
+  $('shareLink').value = base + '?join=' + roomCode;
+}
+
+/* ─── fetch open rooms ─── */
+async function fetchRooms() {
+  try {
+    const res = await fetch('/api/rooms');
+    const list = await res.json();
+    const panel = $('browserPanel');
+    const el = $('roomList');
+    if (list.length === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = '';
+    el.innerHTML = '';
+    list.forEach(r => {
+      if (r.state !== 'lobby') return;
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,253,247,0.05);border-radius:12px;margin-bottom:6px;';
+      row.innerHTML = `
+        <span style="font-weight:900;font-size:18px;color:var(--yellow);letter-spacing:0.1em;">${r.code}</span>
+        <span style="flex:1;">hosted by <strong>${r.hostName}</strong></span>
+        <span style="color:var(--mint);">${r.playerCount}/${r.maxPlayers}</span>
+      `;
+      const joinBtn = document.createElement('button');
+      joinBtn.className = 'btn btn-mint btn-small';
+      joinBtn.textContent = 'Join';
+      joinBtn.addEventListener('click', () => joinRoom(r.code));
+      row.appendChild(joinBtn);
+      el.appendChild(row);
+    });
+  } catch(e) {}
+}
+
+/* ─── launch game ─── */
+function launchGame(raceMsg) {
+  // open the game in a new window, passing the multiplayer data
+  const renderer = 'sim-race-webgl.html'; // use WebGL client (works offline)
+  const gameUrl = '/' + renderer + '?mp=1';
+
+  if (gameWindow && !gameWindow.closed) {
+    gameWindow.focus();
+  } else {
+    gameWindow = window.open(gameUrl, 'bonk_game', 'width=1024,height=768');
+  }
+
+  // wait for game window to be ready, then send init data
+  const sendInit = () => {
+    if (gameWindow && !gameWindow.closed) {
+      gameWindow.postMessage({
+        type: 'mp_init',
+        data: {
+          playerId: myId,
+          simPlayerId: raceMsg.you,
+          seed: raceMsg.seed,
+          roster: raceMsg.roster,
+          settings: raceMsg.settings,
+        }
+      }, '*');
+    }
+  };
+
+  // Retry sending init until game window acknowledges
+  let initSent = false;
+  const iv = setInterval(() => {
+    if (initSent || !gameWindow || gameWindow.closed) { clearInterval(iv); return; }
+    sendInit();
+  }, 500);
+
+  // Listen for game window messages (input, ready)
+  window.addEventListener('message', function handler(e) {
+    if (!e.data || !e.data.type) return;
+    if (e.data.type === 'mp_ready') {
+      initSent = true;
+      clearInterval(iv);
+      sendInit();
+    }
+    if (e.data.type === 'mp_input') {
+      // forward player input to server
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'input', ...e.data.input }));
+      }
+    }
+  });
+
+  $('btnFocusGame').onclick = () => {
+    if (gameWindow && !gameWindow.closed) gameWindow.focus();
+    else launchGame(raceMsg);
+  };
+}
+
+/* ─── results ─── */
+function showResults(ranking) {
+  const overlay = $('resultsOverlay');
+  overlay.classList.add('active');
+
+  const myRank = ranking.find(r => !r.bot && r.id !== undefined);
+  $('resultsTitle').textContent = ranking[0] && !ranking[0].bot ? '🏆 You Won!' : '🏁 Race Over';
+  $('resultsSub').textContent = `${ranking.length} racers finished`;
+
+  const list = $('resultsList');
+  list.innerHTML = '';
+  const medals = ['🥇','🥈','🥉'];
+  ranking.forEach((r, i) => {
+    const li = document.createElement('li');
+    const rankSpan = document.createElement('span');
+    rankSpan.className = 'rank';
+    rankSpan.textContent = medals[i] || (i + 1);
+
+    const avatar = document.createElement('div');
+    avatar.className = 'r-avatar';
+    avatar.style.background = (KINDS[r.kind] || KINDS.zombie).c;
+
+    const name = document.createElement('span');
+    name.className = 'r-name';
+    name.textContent = r.name + (r.bot ? ' 🤖' : '');
+
+    const time = document.createElement('span');
+    time.className = 'r-time';
+    time.textContent = r.finished ? formatTime(r.finishT) : 'DNF';
+
+    li.append(rankSpan, avatar, name, time);
+    list.appendChild(li);
+  });
+
+  showScreen('screenRoom');
+}
+function formatTime(t) {
+  const q = Math.max(0, Math.floor(t * 10));
+  const m = Math.floor(q / 600), s = Math.floor((q % 600) / 10);
+  return m + ':' + (s < 10 ? '0' : '') + s + '.' + (q % 10);
+}
+
+/* ─── button handlers ─── */
+$('btnCreate').addEventListener('click', () => {
+  const name = myName || 'Player';
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected to server', true); return; }
+  ws.send(JSON.stringify({ type: 'setName', name, kind: myKind }));
+  ws.send(JSON.stringify({ type: 'create', settings: {} }));
+});
+
+$('btnJoin').addEventListener('click', () => {
+  const code = $('inputCode').value.trim().toUpperCase();
+  if (!code) { toast('Enter a room code', true); return; }
+  joinRoom(code);
+});
+$('inputCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnJoin').click(); });
+
+function joinRoom(code) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { toast('Not connected to server', true); return; }
+  const name = myName || 'Player';
+  ws.send(JSON.stringify({ type: 'setName', name, kind: myKind }));
+  ws.send(JSON.stringify({ type: 'join', code }));
+}
+
+$('btnLeave').addEventListener('click', () => {
+  if (ws) ws.send(JSON.stringify({ type: 'leave' }));
+  roomCode = null; isHost = false;
+  showScreen('screenMenu');
+  fetchRooms();
+});
+
+$('btnStartRace').addEventListener('click', () => {
+  if (ws) ws.send(JSON.stringify({ type: 'start' }));
+});
+
+$('btnCopyCode').addEventListener('click', () => {
+  navigator.clipboard.writeText(roomCode).then(() => toast('Room code copied!'));
+});
+$('btnShareCopy').addEventListener('click', () => {
+  navigator.clipboard.writeText($('shareLink').value).then(() => toast('Share link copied!'));
+});
+
+$('btnPlayAgain').addEventListener('click', () => {
+  $('resultsOverlay').classList.remove('active');
+  if (isHost && ws) ws.send(JSON.stringify({ type: 'start' }));
+  else toast('Only the host can start a new race');
+});
+$('btnBackToLobby').addEventListener('click', () => {
+  $('resultsOverlay').classList.remove('active');
+});
+
+/* ─── auto-join from URL ─── */
+const params = new URLSearchParams(location.search);
+const autoJoin = params.get('join');
+
+/* ─── init ─── */
+connect();
+if (autoJoin) {
+  // wait for connection, then auto-join
+  const waitAndJoin = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN && myId) {
+      clearInterval(waitAndJoin);
+      joinRoom(autoJoin);
+    }
+  }, 300);
+}
+
+// periodically refresh room list
+setInterval(fetchRooms, 8000);
+
+})();
+</script>
+</body>
+</html>
