@@ -458,7 +458,8 @@ function update(dt, t) {
   if (!paused) {
     const input = playing ? readInput() : null;
     if (isMP) {
-      if (playing && window.opener) window.opener.postMessage({ type: 'mp_input', input }, '*');
+      const parentWin = window.opener || window.parent;
+      if (playing && parentWin) parentWin.postMessage({ type: 'mp_input', input }, '*');
     }
     sim.step(dt, input);
   }
@@ -673,7 +674,8 @@ document.addEventListener('visibilitychange', () => { last = performance.now(); 
 
 if (isMP) {
   $('menu').classList.add('hidden');
-  if (window.opener) window.opener.postMessage({ type: 'mp_ready' }, '*');
+  const parentWin = window.opener || window.parent;
+  if (parentWin) parentWin.postMessage({ type: 'mp_ready' }, '*');
   window.addEventListener('message', e => {
     if (!e.data || !e.data.type) return;
     if (e.data.type === 'mp_init') {

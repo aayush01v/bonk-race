@@ -440,6 +440,8 @@ label { font-size: 13px; font-weight: 800; color: var(--lilac); display: block; 
 
 </div>
 
+<iframe id="gameIframe" style="display:none; position:fixed; inset:0; width:100%; height:100%; border:none; z-index:40; background:#cfeaff;"></iframe>
+
 <!-- Toast -->
 <div class="toast" id="toast"></div>
 
@@ -760,15 +762,15 @@ async function fetchRooms() {
 
 /* ─── launch game ─── */
 function launchGame(raceMsg) {
-  // open the game in a new window, passing the multiplayer data
-  const renderer = 'sim-race-webgl.html'; // use WebGL client (works offline)
+  const renderer = 'sim-race-webgl.html';
   const gameUrl = '/' + renderer + '?mp=1';
 
-  if (gameWindow && !gameWindow.closed) {
-    gameWindow.focus();
-  } else {
-    gameWindow = window.open(gameUrl, 'bonk_game', 'width=1024,height=768');
+  const iframe = $('gameIframe');
+  iframe.style.display = 'block';
+  if (iframe.src !== new URL(gameUrl, window.location.href).href) {
+    iframe.src = gameUrl;
   }
+  gameWindow = iframe.contentWindow;
 
   // wait for game window to be ready, then send init data
   const sendInit = () => {
@@ -810,8 +812,7 @@ function launchGame(raceMsg) {
   });
 
   $('btnFocusGame').onclick = () => {
-    if (gameWindow && !gameWindow.closed) gameWindow.focus();
-    else launchGame(raceMsg);
+    $('gameIframe').style.display = 'block';
   };
 }
 
@@ -819,6 +820,7 @@ function launchGame(raceMsg) {
 function showResults(ranking) {
   const overlay = $('resultsOverlay');
   overlay.classList.add('active');
+  $('gameIframe').style.display = 'none';
 
   const myRank = ranking.find(r => !r.bot && r.id !== undefined);
   $('resultsTitle').textContent = ranking[0] && !ranking[0].bot ? '🏆 You Won!' : '🏁 Race Over';
