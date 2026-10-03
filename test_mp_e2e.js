@@ -13,11 +13,29 @@ function ok(cond, label) {
   if (!cond) failures++;
 }
 
+// decoder matching the client's decodeState() (sim-race-webgl.html): the server
+// sends compact fixed-point arrays (see broadcastState in mp-server.js)
+function decodeState(m) {
+  return {
+    t: m.t / 1000, raceT: m.raceT / 100, phase: m.phase, cd: m.cd / 100, finishCount: m.finishCount,
+    players: m.pl.map(a => ({
+      x: a[0] / 100, y: a[1] / 100, z: a[2] / 100,
+      vx: a[3] / 10, vy: a[4] / 10, vz: a[5] / 10, yaw: a[6] / 100, ground: a[7],
+      stun: a[8] / 100, diveT: a[9] / 100, dead: a[10] / 100, protect: a[11] / 100,
+      ammo: a[12], cp: a[13], finished: a[14] > 0, finishT: a[15] / 100,
+      place: a[16], falls: a[17], bonks: a[18],
+    })),
+    tiles: m.tl.map(a => ({ id: a[0], state: a[1], cy: a[2] / 100, active: a[3] > 0 })),
+    bullets: m.bl.map(a => ({ id: a[0], x: a[1] / 100, y: a[2] / 100, z: a[3] / 100, vx: a[4] / 10, vz: a[5] / 10, owner: a[6] })),
+    pickups: m.pk.map(on => ({ on: on > 0 })),
+  };
+}
+
 // minimal message collector
 function makeClient(name) {
   const c = {
     ws: null, name, welcome: null, joined: null, raceStart: null, raceEnd: null,
-    states: [], lobbies: [], events: 0,
+    states: [], stateBytes: 0, lobbies: [], events: 0,
   };
   c.ws = new WebSocket(URL);
   c.ws.on('open', () => c.ws.send(JSON.stringify({ type: 'setName', name, kind: 'zombie' })));
@@ -28,7 +46,7 @@ function makeClient(name) {
       case 'joined': c.joined = m; break;
       case 'lobby': c.lobbies.push(m); break;
       case 'raceStart': c.raceStart = m; break;
-      case 'state': c.states.push(m); break;
+      case 'state': c.stateBytes += raw.length; c.states.push(decodeState(m)); break;
       case 'events': c.events++; break;
       case 'raceEnd': c.raceEnd = m; break;
     }
@@ -107,9 +125,39 @@ async function main() {
   ok(hs.length > 40, `host received a steady state stream (${hs.length} states)`);
   ok(gs.length > 40, `guest received a steady state stream (${gs.length} states)`);
 
+  await sleep(250); // let the in-flight state packets drain to both clients
+
+  // state spacing: the server broadcasts every 2nd tick, so consecutive packets are
+  // always exactly 2 sim ticks apart (0.0667 s, quantized to 3 decimals) — no more
+  // 33/50/67 ms cadence from two independent timers
+  const gaps = [];
+  for (let i = 1; i < hs.length; i++) gaps.push(hs[i].t - hs[i - 1].t);
+  const inBand = gaps.filter(g => g > 0.05 && g < 0.085).length;
+  ok(gaps.length > 10 && inBand / gaps.length >= 0.98,
+    `state packets tick-aligned (${gaps.length} gaps, ${Math.round(100 * inBand / Math.max(1, gaps.length))}% within 0.05-0.085 s, avg ${gaps.length ? (gaps.reduce((a, b) => a + b, 0) / gaps.length * 1000).toFixed(1) : '0'} ms)`);
+
+  // P2 compact payload: 4 players + crumble tiles + a few bullets should stay
+  // far below the old per-field-object format (~1.9 KB)
+  const avgH = Math.round(host.stateBytes / Math.max(1, hs.length));
+  ok(avgH < 1500, `state payloads compact (avg ${avgH} bytes/state, 4 players)`);
+
   const last = hs[hs.length - 1];
   ok(last && last.phase === 'race', 'race entered "race" phase server-side');
   ok(last && last.raceT > 2, 'server raceT advanced (' + last.raceT + 's)');
+
+  // both clients must agree on every player's position at the same server time
+  // (single authoritative source, no per-client drift mid-race)
+  const ht = last.t;
+  const gsAt = gs.find(m => m.t === ht);
+  ok(!!gsAt, 'both clients received a state at the same last server time');
+  if (gsAt) {
+    let maxD = 0;
+    for (let i = 0; i < gsAt.players.length; i++) {
+      const a = gsAt.players[i], b = last.players[i];
+      maxD = Math.max(maxD, Math.abs(a.x - b.x), Math.abs(a.y - b.y), Math.abs(a.z - b.z));
+    }
+    ok(maxD < 0.011, `client views agree at t=${ht} (max |diff|=${maxD.toFixed(3)})`);
+  }
 
   // input application: host's sim player 0 should have moved forward (z > 0)
   const hostZ = last ? last.players[0].z : 0;

@@ -618,6 +618,13 @@ function handleMessage(msg) {
       }
       break;
 
+    case 'pong':
+      // RTT probe from the game iframe, answered by the server
+      if (gameWindow && !gameWindow.closed) {
+        gameWindow.postMessage({ type: 'mp_pong', ts: msg.ts }, '*');
+      }
+      break;
+
     case 'events':
       if (gameWindow && !gameWindow.closed) {
         gameWindow.postMessage({ type: 'mp_events', data: msg.events }, '*');
@@ -789,6 +796,11 @@ window.addEventListener('message', e => {
     // forward player input to the server
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'input', ...e.data.input }));
+    }
+  } else if (e.data.type === 'mp_ping') {
+    // RTT probe: relay to the server, which answers with 'pong'
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'ping', ts: e.data.ts }));
     }
   }
 });

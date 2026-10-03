@@ -164,7 +164,7 @@ function create(seed) {
   const R = mulberry(seed || 7);
   const C = buildCourse();
   const S = {
-    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0,
+    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1,
     players: [], bullets: [], ev: [],
     solids: C.solids, deco: C.deco, pickups: C.pickups, cps: C.cps, route: C.route,
     finishZ: C.finishZ, length: C.length
@@ -425,7 +425,7 @@ function create(seed) {
     if (inp.fire && canAct && p.ammo > 0 && p.fireCd <= 0) {
       p.ammo--; p.fireCd = FIRE_CD;
       const sx = Math.sin(p.yaw), cz = Math.cos(p.yaw);
-      S.bullets.push({ x: p.x + sx * 0.7, y: p.y + 1.0, z: p.z + cz * 0.7, vx: sx * BULLET_V, vz: cz * BULLET_V, life: BULLET_LIFE, owner: p.id });
+      S.bullets.push({ id: S.bid++, x: p.x + sx * 0.7, y: p.y + 1.0, z: p.z + cz * 0.7, vx: sx * BULLET_V, vz: cz * BULLET_V, life: BULLET_LIFE, owner: p.id });
       emit('fire', p);
     }
     // dive bonks whoever it hits

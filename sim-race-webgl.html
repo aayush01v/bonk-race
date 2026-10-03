@@ -725,7 +725,7 @@ function create(seed) {
   const R = mulberry(seed || 7);
   const C = buildCourse();
   const S = {
-    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0,
+    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1,
     players: [], bullets: [], ev: [],
     solids: C.solids, deco: C.deco, pickups: C.pickups, cps: C.cps, route: C.route,
     finishZ: C.finishZ, length: C.length
@@ -986,7 +986,7 @@ function create(seed) {
     if (inp.fire && canAct && p.ammo > 0 && p.fireCd <= 0) {
       p.ammo--; p.fireCd = FIRE_CD;
       const sx = Math.sin(p.yaw), cz = Math.cos(p.yaw);
-      S.bullets.push({ x: p.x + sx * 0.7, y: p.y + 1.0, z: p.z + cz * 0.7, vx: sx * BULLET_V, vz: cz * BULLET_V, life: BULLET_LIFE, owner: p.id });
+      S.bullets.push({ id: S.bid++, x: p.x + sx * 0.7, y: p.y + 1.0, z: p.z + cz * 0.7, vx: sx * BULLET_V, vz: cz * BULLET_V, life: BULLET_LIFE, owner: p.id });
       emit('fire', p);
     }
     // dive bonks whoever it hits
@@ -1296,6 +1296,7 @@ let myKind = 'zombie', sim = null, me = 0, vis = [], dots = [], flags = [], mode
 let lastN = 0, resultsAt = 0, resultsShown = false, listT = 0, touchOn = false, veilOn = false, paused = false;
 const cam = { x: 0, y: 0, z: 0, init: false, shake: 0, fov: 60 };
 const isMP = typeof location !== 'undefined' && location.search.includes('mp=1');
+const netOn = isMP && new URLSearchParams(location.search).has('net');  // ?net=1: show the netcode debug overlay
 // The lobby launches this game inside an iframe, where window.opener is null.
 // For a window.open()-style launch, parent === window, so fall back to opener there.
 const mpHost = (window.parent && window.parent !== window) ? window.parent : (window.opener || null);
@@ -1566,15 +1567,184 @@ function onEvent(e) {
   }
 }
 
+/* ---------------- MP netcode: interpolation, correction, input ----------------
+   Remotes (other humans AND bots) run the local sim with neutral input — the local
+   sim is a physics shell around the network truth: it resolves my collisions and
+   produces the passive events (land/fall/respawn/pickup/...) the server doesn't
+   relay. Their motion comes from server snapshots interpolated INTERP_DELAY behind
+   the local clock; my player is predicted locally and smoothly corrected toward the
+   server. Fixed 1/60 sub-steps match the server's h. See README §10. */
+const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60, BUF_CAP = 10;
+const snapBuf = [];   // raw server 'state' snapshots, oldest first
+let netMine = null;   // last server sample of my player (correction target)
+let netMineDead = false, lastNetPhase = '', needHardSnapMe = false;
+let simAcc = 0, lastSentInp = null, lastSentAt = 0;
+const netStats = { snaps: 0, gaps: [], rtt: -1, corr: 0, lastStateNow: 0, pingTs: 0, lastPing: 0, lastUi: 0 };
+const NEUTRAL = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
+const wrapA = a => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
+
+// Inverse of mp-server.js broadcastState() (compact fixed-point wire format,
+// documented there): keyless arrays, positions ×100, velocities ×10, t in ms.
+// Decodes to the legacy object shape the rest of the netcode below consumes.
+function decodeState(m) {
+  return {
+    t: m.t / 1000, raceT: m.raceT / 100, phase: m.phase, cd: m.cd / 100, finishCount: m.finishCount,
+    players: m.pl.map(a => ({
+      x: a[0] / 100, y: a[1] / 100, z: a[2] / 100,
+      vx: a[3] / 10, vy: a[4] / 10, vz: a[5] / 10, yaw: a[6] / 100, ground: a[7],
+      stun: a[8] / 100, diveT: a[9] / 100, dead: a[10] / 100, protect: a[11] / 100,
+      ammo: a[12], cp: a[13], finished: a[14] > 0, finishT: a[15] / 100,
+      place: a[16], falls: a[17], bonks: a[18],
+    })),
+    tiles: m.tl.map(a => ({ id: a[0], state: a[1], cy: a[2] / 100, active: a[3] > 0 })),
+    bullets: m.bl.map(a => ({ id: a[0], x: a[1] / 100, y: a[2] / 100, z: a[3] / 100, vx: a[4] / 10, vz: a[5] / 10, owner: a[6] })),
+    pickups: m.pk.map(on => ({ on: on > 0 })),
+  };
+}
+
+function resetNet() {
+  snapBuf.length = 0;
+  netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
+  simAcc = 0; lastSentInp = null; lastSentAt = 0;
+  netStats.snaps = 0; netStats.gaps.length = 0; netStats.corr = 0; netStats.lastStateNow = 0;
+}
+
+// send input only on change (+ one-shot pulses, + 100ms keep-alive) — not every frame
+function sendMPInput(input) {
+  if (!mpHost) return;
+  const now = performance.now();
+  const l = lastSentInp;
+  if (!l || input.mx !== l.mx || input.mz !== l.mz || input.fire !== l.fire ||
+      input.jump || input.dive || now - lastSentAt >= 100) {
+    mpHost.postMessage({ type: 'mp_input', input }, '*');
+    lastSentInp = { mx: input.mx, mz: input.mz, fire: input.fire };
+    lastSentAt = now;
+  }
+}
+
+// the two snapshots that bracket "now - INTERP_DELAY" (clamped when starved)
+function lerpPair() {
+  const b = snapBuf;
+  if (!b.length) return null;
+  const tNow = sim.t - INTERP_DELAY;
+  if (tNow >= b[b.length - 1].t) return { a: b[b.length - 2] || b[0], b: b[b.length - 1], k: 1 };
+  for (let i = b.length - 1; i >= 1; i--) {
+    if (b[i - 1].t <= tNow) {
+      const a = b[i - 1], c = b[i];
+      return { a, b: c, k: (c.t - a.t) > 1e-4 ? clamp((tNow - a.t) / (c.t - a.t), 0, 1) : 1 };
+    }
+  }
+  return { a: b[0], b: b[0], k: 1 };
+}
+
+function applyNet(dt) {
+  const S = sim, L = lerpPair(), remotes = [];
+  if (L) {
+    // remotes: network-true pos/vel/yaw before the local step — no more 15-20 Hz pulse.
+    // The local step then runs neutral-input physics on them (it bleeds their
+    // velocity), so update() re-applies these values after the step: what renders
+    // is the interpolation itself.
+    for (let i = 0; i < S.players.length; i++) {
+      if (i === me) continue;
+      const p = S.players[i], pa = L.a.players[i], pb = L.b.players[i];
+      if (!p || !pa || !pb) continue;
+      let x, y, z, vx, vy, vz, yaw;
+      const dx = pb.x - pa.x, dy = pb.y - pa.y, dz = pb.z - pa.z;
+      if (dx * dx + dy * dy + dz * dz > 64) {  // discontinuity (fall/respawn): newer sample
+        x = pb.x; y = pb.y; z = pb.z; vx = pb.vx; vy = pb.vy; vz = pb.vz; yaw = pb.yaw;
+        netStats.snaps++;
+      } else {
+        const k = L.k;
+        x = pa.x + (pb.x - pa.x) * k;
+        y = pa.y + (pb.y - pa.y) * k;
+        z = pa.z + (pb.z - pa.z) * k;
+        vx = pa.vx + (pb.vx - pa.vx) * k;
+        vy = pa.vy + (pb.vy - pa.vy) * k;
+        vz = pa.vz + (pb.vz - pa.vz) * k;
+        yaw = pa.yaw + wrapA(pb.yaw - pa.yaw) * k;
+      }
+      p.x = x; p.y = y; p.z = z; p.vx = vx; p.vy = vy; p.vz = vz; p.yaw = yaw;
+      remotes.push({ p, x, y, z, vx, vy, vz, yaw });
+    }
+    // crumble tiles: interpolate the falling height (state/active applied on arrival)
+    for (let i = 0; i < L.b.tiles.length; i++) {
+      const tb = L.b.tiles[i], tl = S.solids[tb.id], ta = L.a.tiles[i];
+      if (!tl) continue;
+      const dc = tb.cy - (ta ? ta.cy : tb.cy);
+      tl.cy = dc * dc > 64 ? tb.cy : tb.cy - dc * (1 - L.k);  // respawn teleports: snap
+    }
+    // bullets: keep my live local bullets; rebuild remotes between the two samples
+    for (let i = S.bullets.length - 1; i >= 0; i--) if (S.bullets[i].owner !== me) S.bullets.splice(i, 1);
+    const prev = new Map();
+    for (const ba of L.a.bullets) prev.set(ba.id, ba);
+    const tR = S.t - INTERP_DELAY;  // render time, same clock as lerpPair()
+    for (const bb of L.b.bullets) {
+      if (bb.owner === me) continue;  // my bullets live in sim.bullets, integrated locally
+      const a2 = prev.get(bb.id);
+      let x, y, z;
+      if (a2) {
+        x = a2.x + (bb.x - a2.x) * L.k;
+        y = a2.y + (bb.y - a2.y) * L.k;
+        z = a2.z + (bb.z - a2.z) * L.k;
+      } else {
+        // new this interval: backdate to the render time (constant-velocity flight,
+        // so this is exact once it is in the air). If it hasn't cleared the muzzle
+        // (0.7 u ahead of the owner) at the render time, it isn't in flight yet —
+        // hold it out until the next sample instead of showing it in the wrong place.
+        const bt = L.b.t - tR;
+        x = bb.x - bb.vx * bt; y = bb.y; z = bb.z - bb.vz * bt;
+        const ow = L.b.players[bb.owner];
+        if (ow) { const mx = x - ow.x, mz = z - ow.z; if (mx * mx + mz * mz < 0.5) continue; }
+      }
+      S.bullets.push({ id: bb.id, owner: bb.owner, vx: bb.vx, vz: bb.vz, life: 99, x, y, z });
+    }
+  }
+  // me: smooth correction toward the (velocity-extrapolated) server position.
+  // No velocity pops; instant snap only for true discontinuities.
+  if (netMine) {
+    const p = S.players[me];
+    if (!p) return remotes;
+    const age = clamp(S.t - netMine.t, 0, 0.2);
+    const tx = netMine.x + netMine.vx * age, ty = netMine.y + netMine.vy * age, tz = netMine.z + netMine.vz * age;
+    const ex = tx - p.x, ey = ty - p.y, ez = tz - p.z;
+    netStats.corr = Math.hypot(ex, ey, ez);
+    if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 16) {  // fall/respawn, phase change, or |err| > 4u
+      p.x = netMine.x; p.y = netMine.y; p.z = netMine.z; p.yaw = netMine.yaw;
+      p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
+      p.ground = netMine.ground >= 0 ? S.solids[netMine.ground] : null;
+      needHardSnapMe = false; netStats.snaps++;
+    } else {
+      const f = 1 - Math.exp(-10 * dt);
+      p.x += ex * f; p.y += ey * f; p.z += ez * f;
+      p.yaw += wrapA(netMine.yaw - p.yaw) * f;
+    }
+  }
+  return remotes;
+}
+
 /* ---------------- per-frame update ---------------- */
 function update(dt, t) {
   const playing = mode === 'play';
   if (!paused) {
     const input = playing ? readInput() : null;
     if (isMP) {
-      if (playing && mpHost) mpHost.postMessage({ type: 'mp_input', input }, '*');
+      if (playing) sendMPInput(input);
+      const remotes = applyNet(dt);
+      // fixed 1/60 steps so the local sim's sub-step size matches the server's
+      simAcc += dt;
+      let n = 0;
+      while (simAcc >= SIM_STEP && n < 5) { sim.step(SIM_STEP, input); simAcc -= SIM_STEP; n++; }
+      if (n >= 5) simAcc = 0;  // drop backlog instead of spiral-of-death
+      // re-apply the remote interpolation after the local step: neutral-input physics
+      // would bleed their velocity and drift their position off the network truth
+      for (let i = 0; i < remotes.length; i++) {
+        const r = remotes[i];
+        r.p.x = r.x; r.p.y = r.y; r.p.z = r.z;
+        r.p.vx = r.vx; r.p.vy = r.vy; r.p.vz = r.vz; r.p.yaw = r.yaw;
+      }
+    } else {
+      sim.step(dt, input);
     }
-    sim.step(dt, input);
   }
   if (playing) { pulse.jump = false; pulse.dive = false; }
   for (let i = 0; i < sim.ev.length; i++) onEvent(sim.ev[i]);
@@ -1606,6 +1776,24 @@ function update(dt, t) {
   updateHud();
   if (resultsAt && !resultsShown && t >= resultsAt) showResults();
   else if (resultsShown && t >= listT) { listT = t + 0.4; fillResList(); }
+  if (isMP && netOn && t - netStats.lastUi > 0.25) {
+    netStats.lastUi = t;
+    if (t - netStats.lastPing > 1 && mpHost) {  // RTT probe, 1/s
+      netStats.lastPing = t; netStats.pingTs = performance.now();
+      mpHost.postMessage({ type: 'mp_ping', ts: netStats.pingTs }, '*');
+    }
+    let p95 = 0;
+    if (netStats.gaps.length > 4) {
+      const g = netStats.gaps.slice().sort((a, b) => a - b);
+      p95 = g[(0.95 * g.length) | 0] || 0;
+    }
+    el.net.textContent =
+      'NET  rtt ' + (netStats.rtt < 0 ? '--' : Math.round(netStats.rtt)) + ' ms  ' +
+      'gap p95 ' + Math.round(p95) + ' ms  ' +
+      'snaps ' + netStats.snaps + '  ' +
+      'corr ' + netStats.corr.toFixed(2) + ' u  ' +
+      'delay ' + Math.round(INTERP_DELAY * 1000) + ' ms';
+  }
 }
 
 /* ---------------- drawing ---------------- */
@@ -1787,6 +1975,12 @@ document.addEventListener('visibilitychange', () => { last = performance.now(); 
 
 if (isMP) {
   $('menu').classList.add('hidden');
+  if (netOn) {
+    const n = document.createElement('div');
+    n.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:60;font:11px/1.4 monospace;color:#9fe8c8;background:rgba(10,14,18,.65);padding:4px 8px;border-radius:6px;pointer-events:none';
+    document.body.appendChild(n);
+    el.net = n;
+  }
   if (mpHost) mpHost.postMessage({ type: 'mp_ready' }, '*');
   window.addEventListener('message', e => {
     if (!e.data || !e.data.type) return;
@@ -1799,6 +1993,8 @@ if (isMP) {
       myKind = d.roster.find(p => p.id === me)?.kind || 'zombie';
       sim = Sim.create(d.seed);
       sim.__mpSeed = d.seed;
+      sim.bid = 1e6;  // my local bullet ids: keep them out of the server's id range
+      resetNet();
       // Apply room settings to matching objects (the server applies the same changes)
       if (d.settings) {
         for (const s of sim.solids) {
@@ -1811,6 +2007,9 @@ if (isMP) {
       // (diveCd, fireCd, coyote, jbuf, ...) exist — a hand-built object breaks
       // the local sim (bots crash in think(), first dive/fire never fires).
       for (const r of d.roster) sim.addPlayer({ name: r.name, bot: r.bot, kind: r.kind, skill: r.bot ? 0.8 : 0 });
+      // remotes run on neutral local input: their motion is the interpolated network
+      // state, so local bot think()/fires/jumps can't desync or double-fire events
+      for (let i = 0; i < sim.players.length; i++) if (i !== me) sim.players[i]._mpInput = NEUTRAL;
       sim.begin(); // start the local countdown; server state syncs the exact cd within 50ms
       vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
       flags = [];
@@ -1829,37 +2028,50 @@ if (isMP) {
       buildDots();
     }
     else if (e.data.type === 'mp_state' && sim) {
-      const s = e.data.data;
-      if (Math.abs(sim.t - s.t) > 0.5) { sim.t = s.t; sim.raceT = s.raceT; }
+      const s = decodeState(e.data.data);  // compact wire arrays → legacy shape
+      const now = performance.now();
+      if (netStats.lastStateNow) netStats.gaps.push(now - netStats.lastStateNow);
+      if (netStats.gaps.length > 60) netStats.gaps.shift();
+      netStats.lastStateNow = now;
+      snapBuf.push(s);
+      if (snapBuf.length > BUF_CAP) snapBuf.shift();
+      if (Math.abs(sim.t - s.t) > 0.3) { sim.t = s.t; sim.raceT = s.raceT; }
       sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
+      if (s.phase !== lastNetPhase) { lastNetPhase = s.phase; needHardSnapMe = true; }
       for (let i = 0; i < s.players.length; i++) {
         const p = sim.players[i], sp = s.players[i];
         if (!p || !sp) continue;
-        
-        const thresh = (i === me) ? 2.0 : 0.2; 
-        const dx = p.x - sp.x, dy = p.y - sp.y, dz = p.z - sp.z;
-        if (dx*dx + dy*dy + dz*dz > thresh) {
-          p.x = sp.x; p.y = sp.y; p.z = sp.z; p.vx = sp.vx; p.vy = sp.vy; p.vz = sp.vz; p.yaw = sp.yaw;
-          p.ground = sp.ground >= 0 ? sim.solids[sp.ground] : null;
-        }
-        
+
         p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
         p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
         p.place = sp.place; p.falls = sp.falls; p.bonks = sp.bonks;
+
+        if (i === me) {
+          const dead = sp.dead > 0;
+          if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }  // fall/respawn
+          // position correction happens in applyNet(); keep the last server sample as target
+          netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };
+        }
+        // remotes: pos/vel/yaw are set by applyNet() from the interpolation buffer
       }
       for (const st of s.tiles) {
         const tl = sim.solids[st.id];
         if (tl) { tl.state = st.state; tl.active = st.active; }
       }
-      sim.bullets = s.bullets;
+      // sim.bullets: my bullets stay local; remotes are rebuilt by applyNet() from snapBuf
       for (let i = 0; i < s.pickups.length; i++) if (sim.pickups[i]) sim.pickups[i].on = s.pickups[i].on;
     }
     else if (e.data.type === 'mp_events' && sim) {
-      const events = e.data.data.filter(ev => {
-        const p = sim.players[ev.id];
-        return p && !p.bot && ev.id !== me;
-      });
+      // Remotes run on neutral local input, so their active effects never fire locally:
+      // relay fire/jump/dive for them. Everything else (bonk/hit/spark/pickup/cp/finish/
+      // land/fall/respawn...) is produced by my local sim on network-true positions, so
+      // relaying it too would double-play; my own events are always local.
+      const events = e.data.data.filter(ev => ev.id !== me && ev.by !== me &&
+        (ev.t === 'fire' || ev.t === 'jump' || ev.t === 'dive'));
       sim.ev.push(...events);
+    }
+    else if (e.data.type === 'mp_pong') {
+      netStats.rtt = performance.now() - e.data.ts;
     }
   });
 } else {

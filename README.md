@@ -15,7 +15,8 @@ There are now **two playable clients** built from one shared `game.js`: a **Baby
 | `tests.js` Node checks | Done, all pass |
 | **Babylon.js client**, `client/dist/sim-race-babylon.html` | **Built. Tested only against my own stand-in for Babylon, never against the real library** (section 8) |
 | **WebGL1 client**, `client/dist/sim-race-webgl.html` (your reference game on the current `sim.js`) | **Built and tested in headless Chromium** |
-| Multiplayer (WebSocket rooms, netcode, UI lobby) | **Done, server built in Node + ws** |
+| Multiplayer (rooms, lobby, authoritative server) | **Done — `mp-server.js` + `lobby.html`, MP mode in the WebGL client** (section 10) |
+| MP smoothness (latency / choppiness) | **Fixed and verified** — P0/P1/P2 landed and tested: `test_mp_client_sim.js` runs the shipped client netcode unmodified against a real 30 Hz server sim; `test_mp_e2e.js` drives the real server (section 10 is the record) |
 
 Both clients share one `game.js` (input, HUD, audio, menu, results) taken unchanged from your reference project; only the renderer differs. **The honest gap: nobody has seen the Babylon build render with the real Babylon.js**, because my sandbox could not download it. Open it in a browser first (section 8).
 
@@ -31,29 +32,44 @@ Paste something like:
 
 Check the new session's environment first (`node --version`, is there a browser, is the network on). Last time: Node 22, Python 3.12, **no network**, but a headless Chromium was usable through Playwright (software WebGL), which is what `client/test_clients.js` drives.
 
+Multiplayer smoothness is **done and tested** (section 10): `node test_mp_client_sim.js` runs the shipped client netcode against a real server sim, `node test_mp_e2e.js` drives the real server end-to-end; both are green. Add `?net=1` to the MP iframe URL for a live RTT / packet-arrival / snap / correction overlay.
+
 ---
 
 ## 3. Files
 
 ```
-bonk/
-  README.md                 this file
-  sim.js                    game simulation, ~540 lines, no rendering code
-  tests.js                  Node checks for the sim (node tests.js)
-  client/                   the two playable clients (section 8)
-    ui.html  gl.js  game.js           copied unchanged from your reference project
-    bjs.js                            the Babylon.js renderer (new)
-    build.py                          builds both clients from the shared sources + ../sim.js
-    mock_babylon.js                   a stand-in for the Babylon API, for headless testing only
-    test_clients.js                   browser tests (Playwright)
-    dist/sim-race-babylon.html        built Babylon client (needs internet for the library)
-    dist/sim-race-webgl.html          built WebGL1 client (no network needed)
-  reference/
-    game_Babylon_js/        the "Sim Race" project you supplied, unchanged
-      ui.html  gl.js  game.js  sim-1.js  build.py
-      sim-race-1.html       the built game (one file)
-      sim-race-tests.zip    its own test scripts
+(repo root)
+  README.md                 this file (current; bonk/README.md is the earlier handoff copy)
+  mp-server.js              Node + ws multiplayer server (`npm start`): rooms, authoritative sim, state broadcast
+  lobby.html                lobby UI + WS client; relays server state → game iframe, iframe input → server
+  sim-race-webgl.html       WebGL client — solo, and MP iframe mode (?mp=1) driven by the lobby
+  sim-race-babylon.html     Babylon client (solo only, no MP mode)
+  index.html                solo game page
+  test_mp_e2e.js            end-to-end MP test (real server + two WS clients: create/join/start/input/state, tick alignment, client agreement, payload size)
+  test_mp_init.js           replays the client mp_init flow incl. bots
+  test_mp_client_sim.js     runs the shipped client netcode (extracted verbatim from sim-race-webgl.html) against a real 30 Hz authoritative sim
+  server.js, server.py      solo static servers
+  bonk/
+    README.md               earlier handoff copy of this document
+    sim.js                  game simulation used by the server, ~542 lines, no rendering code
+    tests.js                Node checks for the sim (node tests.js)
+    client/                 the two playable clients (section 8)
+      ui.html  gl.js  game.js           copied unchanged from your reference project
+      bjs.js                        the Babylon.js renderer (new)
+      build.py                      builds both clients from the shared sources + ../sim.js
+      mock_babylon.js               a stand-in for the Babylon API, for headless testing only
+      test_clients.js               browser tests (Playwright)
+      dist/sim-race-babylon.html    built Babylon client (needs internet for the library)
+      dist/sim-race-webgl.html      built WebGL1 client (no network needed)
+    reference/
+      game_Babylon_js/        the "Sim Race" project you supplied, unchanged
+        ui.html  gl.js  game.js  sim-1.js  build.py
+        sim-race-1.html       the built game (one file)
+        sim-race-tests.zip    its own test scripts
 ```
+
+**MP sim-duplication gotcha:** the client's sim is an *embedded copy* of `bonk/sim.js` (differs only in the `_mpInput` selection line and the Node export). Any sim change must be made in **both** or client/server physics diverge silently.
 
 ---
 
@@ -74,7 +90,7 @@ bonk/
 2. Obstacles and course: done (sim)
 3. **Babylon client: next**
 4. Rooms and lobby (Colyseus, room code or link)
-5. Netcode: server-authoritative, client prediction, interpolation for remote players
+5. Netcode: server-authoritative + local prediction, interpolation + smooth own-player correction — **done** (section 10)
 6. Combat polish: more pickups or weapon variants
 7. Rounds: several courses, results, rematch
 8. Polish: art pass, sound, music
@@ -240,9 +256,96 @@ This replaces the old Three.js character-viewer concept. It is a **playable sing
 
 ---
 
-## 10. Multiplayer notes (later)
+## 10. Multiplayer netcode — current state, diagnosis record, verification
 
-- `humanId` / `humanInp` only supports **one** human. For multiplayer, change `sub()` and `S.step()` to take **per-player input** (for example `p.input`, or a map keyed by id).
-- Moving solids (`spin`, `slide`, `piston`) are pure functions of `S.t`; only crumble tiles carry a state machine. So a client needs the server time offset plus tile states to render the world identically.
-- `p.ground` is an object reference; send its `id` over the wire. Add snapshot serialisation, input sequence numbers, client prediction with reconciliation, and interpolation for remote players (about 100 ms).
-- The sim is deterministic for a given seed and input stream (tested with bots), which makes server-authoritative play with client prediction realistic.
+Multiplayer is **built and smooth**: rooms, lobby, authoritative 30 Hz server, tick-aligned compact 15 Hz snapshots, 100 ms interpolation for remotes, smooth own-player correction, change-detection input. **All P0/P1/P2 fixes have landed and are verified** by `test_mp_client_sim.js` and `test_mp_e2e.js` (10.6). The diagnosis below (10.1–10.5) is kept as the record of what was wrong and why each fix is shaped the way it is. Re-verify line numbers before editing — they move.
+
+### 10.1 Architecture (current)
+
+```
+your keys ─(mp_input, on change + 100 ms keepalive)─▶ postMessage ─▶ lobby.html ─▶ WebSocket ─▶ mp-server.js
+                                                                              │ authoritative sim, 30 ticks/s
+      game iframe ◀─postMessage─ lobby.html ◀── WebSocket ── compact state broadcast, 15 Hz (every 2nd tick, tick-aligned)
+```
+
+- **`mp-server.js`** — Node + ws. One authoritative `bonk/sim.js` per room (`humanId = -1`; humans driven through `p._mpInput`). One `setInterval` for the 30 Hz sim tick; state is broadcast **from inside `tick()`** every 2nd tick (`mp-server.js:309`), so consecutive packets are always exactly two sim ticks (66.7 ms) apart and carry a fresh post-tick state. Payload is the compact fixed-point format documented above `broadcastState` (`mp-server.js:312-327`). Also: rooms, host settings, bots, kick, host transfer, results, rematch, and a 1 Hz `ping`/`pong` RTT probe (`mp-server.js:526`).
+- **`lobby.html`** — the WS client and room UI. Pure relay: server `state`/`events`/`pong` → `postMessage` to the game iframe (one message per packet); iframe `mp_input`/`mp_ping` → WS, forwarded verbatim.
+- **`sim-race-webgl.html?mp=1`** — the game in the iframe. Runs a full local sim (same seed + roster as the server) on **fixed `1/60` sub-steps** (rAF time accumulated) so its sub-step size matches the server's `h`. The netcode block is `sim-race-webgl.html:1577-1723`:
+  - `decodeState()` inverts the compact wire format.
+  - A ring of the last 10 snapshots (`snapBuf`); **remotes (other humans AND bots) are rendered 100 ms behind the local clock**, lerped between the two bracketing samples (`lerpPair`). Their pos/vel/yaw are written into the local sim before each step and re-applied after it, so local physics never owns their motion (it only resolves their collisions) — no more 15–20 Hz pulse. Discontinuities > 8 u (fall/respawn) snap to the newer sample instead of lerping across the map.
+  - **Own player:** local prediction (your input applied the same frame) with a decaying correction toward the velocity-extrapolated server position (`f = 1 − exp(−10·dt)`); instant hard snap only on true discontinuities (fall/respawn, phase change, |err| > 4 u).
+  - **Bullets:** your live bullets stay local; remotes are rebuilt by `id` between the two bracketing samples each frame (new bullets backdated to render time, held out until they clear the muzzle).
+  - **Crumble tiles:** the falling `cy` is interpolated like player positions.
+  - `sendMPInput()` posts input only on change (+ one-shot pulses + 100 ms keepalive) — not every frame.
+  - `?net=1` shows a live overlay: RTT, packet-arrival gap p95, hard-snap count, current correction magnitude, interpolation delay.
+- **`sim-race-babylon.html`** — solo only; no MP mode.
+
+### 10.2 What already works
+
+- Server-authoritative rooms, roster/order, bots, host settings (spinner speed, crumble hold, bounce force, gravity), kick, host transfer, results, rematch.
+- **Your own input feels fine**: the local sim applies it the same frame (~1-frame latency); the correction is now the smooth decaying one (P0-C), not the old hard snap.
+- Discrete events (bonk/fall/finish/fire/…) relayed by the server so effects play on other clients; the client filters to remote humans only.
+- Tests: `test_mp_client_sim.js` (the shipped netcode, extracted verbatim from the HTML, run 15 s against a real 30 Hz server sim with 1-tick input + delivery latency), `test_mp_e2e.js` (real server, two WS clients through create/join/start/input/state, tick alignment, client agreement, payload size) and `test_mp_init.js` (the client `mp_init` flow incl. bots). All green.
+
+### 10.3 Latency budget, as it stands (LAN)
+
+| stage | time |
+|---|---|
+| key → local sim (your own motion) | 1 frame (~16 ms) — fine |
+| key → lobby → server | ~2–5 ms + JSON overhead; input is sent only on change, so usually one small packet |
+| server: wait for next tick | 0–33 ms (avg 17) |
+| server: wait for next state broadcast | 0–33 ms (broadcast is tick-aligned, so always a whole tick; no independent timer drift) |
+| **your action visible to other players** | ~50–90 ms + RTT/2 — arriving as uniform 66.7 ms samples that the clients interpolate, so it reads as one smooth 100 ms-delayed stream, not 20 Hz steps |
+| their action visible to you | same, minus the snap artifact — remotes **are** the interpolation |
+
+The iframe/postMessage hop is sub-millisecond and is **not** a problem. The remaining fixed cost is the deliberate 100 ms interpolation delay (`INTERP_DELAY`); drop it to 0.08 s if a LAN feel ever needs it.
+
+### 10.4 Root causes of the choppiness (pre-fix state, by impact)
+
+All eight are fixed (10.5); line numbers below point at the old code.
+
+1. **Remote players are 20 Hz snap-steps.** For every player but yourself, the local sim gets `EMPTY` input (`bonk/sim.js:527`), so locally they friction-slide to a stop; each state packet snaps them back to server pos/vel, then local physics bleeds their velocity off again. At run speed (7.4 u/s, ground decel 65 u/s²) the local sim takes ~50 ms — exactly one update — to decay their speed to ~0. So **every remote player visibly re-pulses on every 50 ms packet**. The 0.2² threshold is exceeded almost every frame; the snap effectively fires on every packet.
+2. **Two independent server timers.** Tick (33.3 ms) and state (50 ms) are separate `setInterval`s (`mp-server.js:251-252`): the sim-time gap between consecutive packets alternates 33/50/67 ms and drifts; packets carry no tick index. Even a good interpolator would judder on that cadence.
+3. **Own-player rubber-band via hard snap.** Local prediction is right, but correction is an instant pos+vel overwrite once error² > 2.0 (`sim-race-webgl.html:1841-1843`). Divergence accumulates from (a) your input reaching the server ~RTT/2 + up to one tick after the local sim already applied it, and (b) mismatched sub-step size: the server always steps at exactly `h = 1/60` (`bonk/sim.js:532-536`: dt = 1/30 → 2 sub-steps), while the client feeds variable rAF `dt`, so its `h` jitters ~16.5–16.8 ms frame to frame. Slow drift → pop.
+4. **Bullets snap at 20 Hz.** `sim.bullets = s.bullets` wholesale (`sim-race-webgl.html:1854`); a bullet at 26 u/s moves 1.3 units per packet. The local `stepBullets` happens to keep integrating the server's array objects between updates (accidental extrapolation), but the array is replaced every packet and your own just-fired bullet can vanish/reappear. Visible flicker.
+5. **Input pipeline: 60 JSON msgs/s, no change detection.** `mp_input` is posted every frame (`sim-race-webgl.html:1575`) and the lobby forwards each one verbatim to the WS. Keyboard mx/mz ∈ {−1, 0, 1}, so ~50 of the 60/s are duplicates — wasted JSON at every hop (iframe clone → lobby stringify → server parse + handler).
+6. **Crumble tiles desync while falling.** The client applies the server `state`/`active` but not `cy` (`sim-race-webgl.html:1850-1853`), then integrates its own fall from a stale height on its own clock — tiles fall at different heights/times on different clients.
+7. **Bots double-simulated.** Local `think()` runs with a divergent PRNG stream (`R()` consumption depends on sub-step cadence) and timing → local-only bot decisions and events (a bonk that never happened on the server), later corrected by snaps. The "ghost" interactions.
+8. **Minor:** the server logged 5% of inputs mid-tick (removed); `sim.t` only re-syncs when drift > 0.3 s (`sim-race-webgl.html`), so a throttled background tab drifts silently; `broadcastState` allocated a `toFixed` string per field per player at 20 Hz (GC churn on the server — fixed in P2 with fixed-point integer serialization, no strings).
+
+### 10.5 Fix plan (all landed)
+
+**P0-A · Server: one timer, broadcast aligned to ticks — DONE** as written; the input `console.log` went with it. `test_mp_e2e.js` asserts the resulting cadence (100% of gaps within 0.05–0.085 s, avg 66.7 ms).
+
+**P0-B · Client: interpolation buffer for everything remote — DONE.** Ring is 10 snapshots; delay 100 ms. One addition the plan didn't name: the local `step`'s neutral-input physics bleeds the remotes' velocity, so the interpolated values are re-applied **after** the step too — what renders is the interpolation itself. Discontinuities > 8 u snap instead of lerp. This fixed 1, 4 (with the id-keyed bullet rebuild), 6 and 7, and makes 2 invisible.
+
+**P0-C · Client: smooth own-player correction — DONE** as written, plus the server sample is velocity-extrapolated by its age before the correction, so the target stays on the moving player's line and the correction magnitude stays small (test p95 0.36 u over 15 s).
+
+**P1 · Client: fixed-timestep local sim — DONE** as written; backlog past 5 sub-steps is dropped instead of spiralling.
+
+**P1 · Input: send on change — DONE** as written (`sendMPInput`, 100 ms keepalive).
+
+**P2 · Compact payloads — DONE.** State packets are now keyless positional arrays in fixed-point (positions ×100, velocities ×10, sim time in ms; player index = player id, no `id` field; documented above `broadcastState` in `mp-server.js`, reversed by `decodeState()` in `sim-race-webgl.html`). This is far smaller than the old per-field objects (e2e measures the average: 4 players + crumble tiles ≈ 370 bytes vs ~1.9 KB) and removes every `toFixed` from the 15 Hz hot path — `Math.round` integers instead of per-field string allocation. Event packets also quantize their x/y/z to 2 decimals on the wire (clients only use them to place effects). `test_mp_e2e.js` has a size regression guard. `perMessageDeflate` still considered only if measured to help — it trades CPU for bytes.
+
+**Considered, not doing:**
+
+- **Delta/diffed snapshots** — worthwhile at 32+ players; at ≤8 players full 15–30 Hz state is smaller in practice and far simpler. Revisit if rooms grow.
+- **Binary payloads (Float32Array + binary WS frames)** — ~2× smaller and no parse cost, but only worth it once P2 shows JSON is actually a hotspot.
+- **Server lag compensation (rewind to input timestamp)** — for frame-perfect hit resolution; this game's knockback physics is forgiving and 15–30 Hz authoritative state suffices.
+- **Extrapolation of remote players** instead of interpolation — amplifies jitter and packet loss; interpolation is the standard for this game class.
+- **Colyseus** (originally planned, section 4) — it's the same netcode model (tick + snapshot + client-side interpolation); the hand-rolled server is working, no reason to switch now.
+- **WebRTC datachannel / P2P** — only if hosting cross-region with high RTT demands lower remote-player latency than the interpolation budget tolerates.
+
+### 10.6 Verification (results)
+
+- **`node test_mp_client_sim.js`** — extracts the shipped netcode block verbatim from `sim-race-webgl.html` and runs it, unmodified, against a real `bonk/sim.js` server at 30 Hz with 1-tick input delay and 1-tick delivery latency (15 s of race, 3 racers incl. a bot). All pass:
+  - remotes track the server's interpolated position: p95 0.36 u, mean 0.20 u, **zero** velocity-decay frames;
+  - own player's correction stays within p95 0.36 u;
+  - remote bullets (rebuilt by id, ~20 shots) track the server to p95 0.01 u;
+  - a just-fired own bullet survives the per-frame rebuild while the server hasn't seen it;
+  - the snapshot ring stays bounded.
+  (Test gotchas learned the hard way: the server copy of your own player needs ammo — the client's is synced down from it; bullets die fast on the spinner bars, so a few shots yield too few samples; and a fall→respawn teleport makes a linear reference meaningless, so those intervals are skipped.)
+- **`node test_mp_e2e.js`** — real server, two WS clients: tick-aligned state (100% of gaps 0.05–0.085 s, avg 66.7 ms), compact payloads (avg ~367 B vs ~1.9 KB old), both clients agree on every player position to < 0.011 u at the same server time, all four racers advance, events relayed, no server errors.
+- **`?net=1` overlay** — RTT (1 Hz ping relayed through the lobby), packet-arrival gap p95, hard-snap count, live correction magnitude, interpolation delay. How to prove it is actually smoother, not just different.
+- **Two-window playtest (recommended, not run in the sandbox):** open the lobby in two browsers against the same server: remote players should move at 60 fps with no pulse, own player never pops except on respawn, crumble tiles fall in sync, bullets travel smoothly.
+- **Solo mode untouched:** every P0/P1 change is gated behind `isMP` (`sim-race-webgl.html:1298`) or is server-side, so `index.html` and the Babylon client are unchanged.

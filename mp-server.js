@@ -37,7 +37,7 @@ const PORT = parseInt(process.env.PORT || '8000', 10);
 const HOST = '0.0.0.0';
 const ROOT = path.resolve(__dirname);
 const TICK_RATE = 30;            // server sim ticks/sec
-const STATE_RATE = 20;           // state broadcasts/sec
+const STATE_EVERY = 2;           // broadcast state every Nth tick (30/2 = 15 Hz, tick-aligned)
 const MAX_ROOMS  = 50;
 const MAX_PLAYERS_PER_ROOM = 8;
 const ROOM_CODE_LEN = 5;
@@ -52,6 +52,8 @@ const MIME = {
 };
 
 /* ─── helpers ─── */
+const r100 = v => Math.round(v * 100);  // fixed-point ×100, no toFixed string churn
+const r10  = v => Math.round(v * 10);   // fixed-point ×10
 function genCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
@@ -76,7 +78,7 @@ class Room {
     this.sim    = null;
     this.seed   = (Math.random() * 1e9) | 0;
     this.tickIv = null;
-    this.stateIv = null;
+    this.tickCount = 0;
     this.raceEndTimer = null;
 
     // host-configurable settings
@@ -134,7 +136,6 @@ class Room {
 
   destroy() {
     if (this.tickIv) clearInterval(this.tickIv);
-    if (this.stateIv) clearInterval(this.stateIv);
     if (this.raceEndTimer) clearTimeout(this.raceEndTimer);
     rooms.delete(this.code);
     console.log(`[Room ${this.code}] destroyed`);
@@ -243,13 +244,13 @@ class Room {
       });
     }
 
-    // start ticking
+    // start ticking — state is broadcast from inside tick() every STATE_EVERY-th
+    // tick, so packets are always exactly N sim ticks apart (client can interpolate)
     if (this.tickIv) clearInterval(this.tickIv);
-    if (this.stateIv) clearInterval(this.stateIv);
+    this.tickCount = 0;
 
     const tickDt = 1 / TICK_RATE;
     this.tickIv = setInterval(() => this.tick(tickDt), tickDt * 1000);
-    this.stateIv = setInterval(() => this.broadcastState(), 1000 / STATE_RATE);
 
     console.log(`[Room ${this.code}] race started with ${this.sim.players.length} players (${this.clients.size} human, ${this.settings.botCount} bots)`);
   }
@@ -282,7 +283,12 @@ class Room {
     // other clients so their effects play. Each client's local sim already fires
     // its own + the bots' events, so the client filters these to other humans.
     const evs = this.sim.ev.splice(0);
-    if (evs.length) this.broadcast({ type: 'events', events: evs });
+    if (evs.length) {
+      // events carry full-precision floats; clients only place effects at x/y/z,
+      // so quantize before the wire (2 decimals is sub-pixel at game scale)
+      for (const e of evs) { e.x = Math.round(e.x * 100) / 100; e.y = Math.round(e.y * 100) / 100; e.z = Math.round(e.z * 100) / 100; }
+      this.broadcast({ type: 'events', events: evs });
+    }
 
     // check for race end
     if (this.state === 'racing') {
@@ -298,51 +304,59 @@ class Room {
         }
       }
     }
+
+    // aligned state broadcast (see startRace): fresh post-tick state, fixed spacing
+    if (++this.tickCount % STATE_EVERY === 0) this.broadcastState();
   }
 
+  /*
+   * Compact fixed-point state payload (P2): keyless positional arrays, integer
+   * scaling instead of toFixed — ~half the bytes of the old per-field objects and
+   * no per-field string allocation at 15 Hz. decodeState() in sim-race-webgl.html
+   * (and in the tests) reverses it.
+   *
+   *   t        sim time, ms (×1000)
+   *   raceT/cd/finishT  centiseconds (×100)
+   *   pl[i]    index = player id:
+   *            [x,y,z ×100, vx,vy,vz ×10, yaw ×100, ground,
+   *             stun,diveT,dead,protect ×100, ammo, cp, finished(0/1),
+   *             finishT ×100, place, falls, bonks]
+   *   tl[i]    crumble solid: [id, state, cy ×100, active(0/1)]
+   *   bl[i]    bullet: [id, x,y,z ×100, vx,vz ×10, owner]
+   *   pk[i]    pickup on (0/1)
+   */
   broadcastState() {
     if (!this.sim) return;
     const S = this.sim;
-    const players = S.players.map(p => ({
-      id: p.id, x: +p.x.toFixed(2), y: +p.y.toFixed(2), z: +p.z.toFixed(2),
-      vx: +p.vx.toFixed(1), vy: +p.vy.toFixed(1), vz: +p.vz.toFixed(1),
-      yaw: +p.yaw.toFixed(2),
-      ground: p.ground ? p.ground.id : -1,
-      stun: +p.stun.toFixed(2), diveT: +p.diveT.toFixed(2), dead: +p.dead.toFixed(2),
-      protect: +p.protect.toFixed(2), ammo: p.ammo, cp: p.cp,
-      finished: p.finished, finishT: p.finished ? +p.finishT.toFixed(2) : 0,
-      place: p.place, falls: p.falls, bonks: p.bonks,
-    }));
-
-    // crumble tile states
-    const tiles = [];
-    for (const s of S.solids) {
-      if (s.kind === 'crumble') {
-        tiles.push({ id: s.id, state: s.state, cy: +s.cy.toFixed(2), active: s.active });
-      }
-    }
+    const pl = [];
+    for (const p of S.players) pl.push([
+      r100(p.x), r100(p.y), r100(p.z), r10(p.vx), r10(p.vy), r10(p.vz), r100(p.yaw),
+      p.ground ? p.ground.id : -1,
+      r100(p.stun), r100(p.diveT), r100(p.dead), r100(p.protect),
+      p.ammo, p.cp, p.finished ? 1 : 0, p.finished ? r100(p.finishT) : 0,
+      p.place, p.falls, p.bonks,
+    ]);
+    const tl = [];
+    for (const s of S.solids) if (s.kind === 'crumble')
+      tl.push([s.id, s.state, r100(s.cy), s.active ? 1 : 0]);
+    const bl = [];
+    for (const b of S.bullets) bl.push([b.id, r100(b.x), r100(b.y), r100(b.z), r10(b.vx), r10(b.vz), b.owner]);
 
     this.broadcast({
       type: 'state',
-      t: +S.t.toFixed(3),
-      raceT: +S.raceT.toFixed(2),
+      t: Math.round(S.t * 1000),
+      raceT: r100(S.raceT),
       phase: S.phase,
-      cd: +S.cd.toFixed(2),
+      cd: r100(S.cd),
       finishCount: S.finishCount,
-      players,
-      tiles,
-      bullets: S.bullets.map(b => ({
-        x: +b.x.toFixed(2), y: +b.y.toFixed(2), z: +b.z.toFixed(2),
-        vx: +b.vx.toFixed(1), vz: +b.vz.toFixed(1), owner: b.owner,
-      })),
-      pickups: S.pickups.map(k => ({ on: k.on })),
+      pl, tl, bl,
+      pk: S.pickups.map(k => k.on ? 1 : 0),
     });
   }
 
   endRace() {
     this.state = 'results';
     if (this.tickIv) { clearInterval(this.tickIv); this.tickIv = null; }
-    if (this.stateIv) { clearInterval(this.stateIv); this.stateIv = null; }
     this.raceEndTimer = null;
 
     const ranking = this.sim.ranking().map((p, i) => ({
@@ -366,9 +380,6 @@ class Room {
     // update continuous input
     c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
     c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
-    if (Math.random() < 0.05 && (c.input.mx !== 0 || c.input.mz !== 0)) {
-      console.log(`[Input] ${c.name} mx:${c.input.mx.toFixed(2)} mz:${c.input.mz.toFixed(2)}`);
-    }
     // one-shot flags accumulate until consumed
     if (input.jump) c.input.jump = true;
     if (input.dive) c.input.dive = true;
@@ -511,6 +522,11 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      /* ── RTT probe (game iframe pings through the lobby) ── */
+      case 'ping':
+        ws.send(JSON.stringify({ type: 'pong', ts: msg.ts }));
+        break;
+
       /* ── update character ── */
       case 'kind':
         client.kind = msg.kind || 'zombie';
@@ -543,7 +559,7 @@ httpServer.listen(PORT, HOST, () => {
     console.log(`  Lobby:       https://${cs}-${PORT}.app.github.dev/lobby.html`);
   }
   console.log('═'.repeat(60));
-  console.log(`  Tick rate: ${TICK_RATE}/s | State broadcast: ${STATE_RATE}/s`);
+  console.log(`  Tick rate: ${TICK_RATE}/s | State broadcast: ${TICK_RATE / STATE_EVERY}/s (every ${STATE_EVERY}nd tick)`);
   console.log(`  Max rooms: ${MAX_ROOMS} | Max players/room: ${MAX_PLAYERS_PER_ROOM}`);
   console.log('═'.repeat(60));
   console.log('');
