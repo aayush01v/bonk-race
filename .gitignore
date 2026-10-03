@@ -23,3 +23,6 @@ desktop.ini
 # Server logs & scratch
 *.log
 /tmp/
+
+# Claude Code — local, machine-specific settings (may contain secrets; never commit)
+.claude/settings.local.json

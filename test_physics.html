@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="bonk/sim.js"></script>
+</head>
+<body>
+  <div id="out"></div>
+  <script>
+    const out = document.getElementById('out');
+    function log(msg) { out.innerHTML += msg + '<br>'; }
+    
+    log("Starting test...");
+    
+    try {
+      // 1. Create sim
+      const sim = Sim.create(12345);
+      
+      // 2. Add human player
+      const p = sim.addPlayer({ name: 'Human', bot: false, kind: 'zombie', skill: 0 });
+      
+      // 3. Begin countdown
+      sim.begin();
+      
+      log("Phase: " + sim.phase);
+      log("Initial p.z: " + p.z);
+      
+      // 4. Step the simulation
+      for (let i = 0; i < 200; i++) { // 200 ticks of 0.05s = 10 seconds
+        const dt = 0.05;
+        
+        // Provide mpInput
+        p._mpInput = { mx: 0, mz: -1, jump: false, dive: false, fire: false };
+        
+        sim.step(dt, null);
+        
+        if (i % 20 === 0) {
+          log(`Tick ${i}: phase=${sim.phase}, cd=${sim.cd.toFixed(2)}, raceT=${sim.raceT.toFixed(2)}, p.z=${p.z.toFixed(2)}, p.vz=${p.vz.toFixed(2)}, canAct=${sim.phase === 'race' && !p.finished}`);
+        }
+      }
+      log("Test complete.");
+    } catch (e) {
+      log("ERROR: " + e.message + "<br>" + e.stack);
+    }
+  </script>
+</body>
+</html>

@@ -761,7 +761,40 @@ async function fetchRooms() {
 }
 
 /* ─── launch game ─── */
+let lastRaceMsg = null, initRetryIv = null;
+
+function sendInitToGame() {
+  if (!lastRaceMsg || !gameWindow || gameWindow.closed) return;
+  gameWindow.postMessage({
+    type: 'mp_init',
+    data: {
+      playerId: myId,
+      simPlayerId: lastRaceMsg.you,
+      seed: lastRaceMsg.seed,
+      roster: lastRaceMsg.roster,
+      settings: lastRaceMsg.settings,
+    }
+  }, '*');
+}
+
+// Registered once for the page lifetime (launchGame runs again after every race).
+// Note: the game iframe replies via window.parent.postMessage (window.opener
+// is null inside an iframe), so these events arrive here as normal messages.
+window.addEventListener('message', e => {
+  if (!e.data || !e.data.type) return;
+  if (e.data.type === 'mp_ready') {
+    if (initRetryIv) { clearInterval(initRetryIv); initRetryIv = null; }
+    sendInitToGame(); // game is ready — send one final init (client ignores duplicates)
+  } else if (e.data.type === 'mp_input') {
+    // forward player input to the server
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'input', ...e.data.input }));
+    }
+  }
+});
+
 function launchGame(raceMsg) {
+  lastRaceMsg = raceMsg;
   const renderer = 'sim-race-webgl.html';
   const gameUrl = '/' + renderer + '?mp=1';
 
@@ -772,44 +805,12 @@ function launchGame(raceMsg) {
   }
   gameWindow = iframe.contentWindow;
 
-  // wait for game window to be ready, then send init data
-  const sendInit = () => {
-    if (gameWindow && !gameWindow.closed) {
-      gameWindow.postMessage({
-        type: 'mp_init',
-        data: {
-          playerId: myId,
-          simPlayerId: raceMsg.you,
-          seed: raceMsg.seed,
-          roster: raceMsg.roster,
-          settings: raceMsg.settings,
-        }
-      }, '*');
-    }
-  };
-
-  // Retry sending init until game window acknowledges
-  let initSent = false;
-  const iv = setInterval(() => {
-    if (initSent || !gameWindow || gameWindow.closed) { clearInterval(iv); return; }
-    sendInit();
+  // Re-send init every 500ms until the game window acknowledges with mp_ready
+  if (initRetryIv) clearInterval(initRetryIv);
+  initRetryIv = setInterval(() => {
+    if (!gameWindow || gameWindow.closed) { clearInterval(initRetryIv); initRetryIv = null; return; }
+    sendInitToGame();
   }, 500);
-
-  // Listen for game window messages (input, ready)
-  window.addEventListener('message', function handler(e) {
-    if (!e.data || !e.data.type) return;
-    if (e.data.type === 'mp_ready') {
-      initSent = true;
-      clearInterval(iv);
-      sendInit();
-    }
-    if (e.data.type === 'mp_input') {
-      // forward player input to server
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'input', ...e.data.input }));
-      }
-    }
-  });
 
   $('btnFocusGame').onclick = () => {
     $('gameIframe').style.display = 'block';

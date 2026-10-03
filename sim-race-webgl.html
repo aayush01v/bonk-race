@@ -1296,6 +1296,9 @@ let myKind = 'zombie', sim = null, me = 0, vis = [], dots = [], flags = [], mode
 let lastN = 0, resultsAt = 0, resultsShown = false, listT = 0, touchOn = false, veilOn = false, paused = false;
 const cam = { x: 0, y: 0, z: 0, init: false, shake: 0, fov: 60 };
 const isMP = typeof location !== 'undefined' && location.search.includes('mp=1');
+// The lobby launches this game inside an iframe, where window.opener is null.
+// For a window.open()-style launch, parent === window, so fall back to opener there.
+const mpHost = (window.parent && window.parent !== window) ? window.parent : (window.opener || null);
 
 function makeSim() {
   const s = Sim.create((Math.random() * 1e9) | 0);
@@ -1465,6 +1468,9 @@ function fillResList() {
 }
 function showResults() {
   resultsShown = true;
+  // MP: the lobby shows authoritative results shortly after — these solo buttons would desync the sim
+  $('btnAgain').style.display = isMP ? 'none' : '';
+  $('btnMenu').style.display = isMP ? 'none' : '';
   const p = sim.players[me];
   el.resHead.textContent = p.place === 1 ? 'You won!' : ord(p.place) + ' place';
   let sub = 'Time ' + fmt(p.finishT);
@@ -1477,6 +1483,7 @@ function showResults() {
 
 /* ---------------- flow ---------------- */
 function startGame() {
+  if (isMP) return; // MP races are driven by the lobby via mp_init — restarting locally would replace the synced sim
   audioInit();
   attach(makeSim()); sim.begin();
   mode = 'play'; cam.init = false; cam.shake = 0; lastN = 0; resultsAt = 0; resultsShown = false;
@@ -1487,6 +1494,7 @@ function startGame() {
   buildDots(); try { window.focus(); } catch (_) {}
 }
 function goMenu() {
+  if (isMP) return; // MP: the lobby owns the post-race flow (results + rematch)
   mode = 'menu'; attach(makeSim()); clearInput(); resultsShown = false;
   el.hud.classList.add('hidden'); el.touch.classList.add('hidden'); el.results.classList.add('hidden');
   el.menu.classList.remove('hidden'); veilOn = false; el.veil.classList.remove('on');
@@ -1564,7 +1572,7 @@ function update(dt, t) {
   if (!paused) {
     const input = playing ? readInput() : null;
     if (isMP) {
-      if (playing && window.opener) window.opener.postMessage({ type: 'mp_input', input }, '*');
+      if (playing && mpHost) mpHost.postMessage({ type: 'mp_input', input }, '*');
     }
     sim.step(dt, input);
   }
@@ -1779,25 +1787,31 @@ document.addEventListener('visibilitychange', () => { last = performance.now(); 
 
 if (isMP) {
   $('menu').classList.add('hidden');
-  if (window.opener) window.opener.postMessage({ type: 'mp_ready' }, '*');
+  if (mpHost) mpHost.postMessage({ type: 'mp_ready' }, '*');
   window.addEventListener('message', e => {
     if (!e.data || !e.data.type) return;
     if (e.data.type === 'mp_init') {
-      audioInit();
       const d = e.data.data;
+      // The lobby retries init while waiting for mp_ready; only re-init when the race actually changes
+      if (sim && sim.__mpSeed === d.seed) return;
+      audioInit();
       me = d.simPlayerId;
       myKind = d.roster.find(p => p.id === me)?.kind || 'zombie';
       sim = Sim.create(d.seed);
-      // Apply room settings to matching objects
+      sim.__mpSeed = d.seed;
+      // Apply room settings to matching objects (the server applies the same changes)
       if (d.settings) {
         for (const s of sim.solids) {
           if (s.kind === 'spin' && d.settings.spinnerSpeed !== undefined) s.om *= d.settings.spinnerSpeed;
-          if (s.kind === 'crumble' && d.settings.crumbleHold !== undefined) s.timer = d.settings.crumbleHold; // default shake timer is in sim.js, but we update state from server anyway
           if (s.bounce && d.settings.bounceForce !== undefined) s.bounce = d.settings.bounceForce;
         }
       }
       sim.humanId = me;
-      sim.players = d.roster.map(r => ({ ...r, x:0, y:0, z:0, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 }));
+      // Build full player objects via addPlayer so bot AI (p.ai) and all timers
+      // (diveCd, fireCd, coyote, jbuf, ...) exist — a hand-built object breaks
+      // the local sim (bots crash in think(), first dive/fire never fires).
+      for (const r of d.roster) sim.addPlayer({ name: r.name, bot: r.bot, kind: r.kind, skill: r.bot ? 0.8 : 0 });
+      sim.begin(); // start the local countdown; server state syncs the exact cd within 50ms
       vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
       flags = [];
       for (let i = 1; i < sim.cps.length; i++) {

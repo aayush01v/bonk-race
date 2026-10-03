@@ -105,8 +105,16 @@ class Room {
   }
 
   removeClient(playerId) {
+    const leaving = this.clients.get(playerId);
     this.clients.delete(playerId);
     console.log(`[Room ${this.code}] player left, ${this.clients.size} remain`);
+
+    // if a race is live, freeze the leaver as finished so their ghost
+    // doesn't stand on the track
+    if (leaving && this.sim && leaving.simPlayerId >= 0) {
+      const p = this.sim.players[leaving.simPlayerId];
+      if (p && !p.finished) { p.finished = true; p.finishT = this.sim.raceT; }
+    }
 
     if (this.clients.size === 0) {
       this.destroy();
@@ -270,8 +278,11 @@ class Room {
       c.input.dive = false;
     }
 
-    // drain events
-    this.sim.ev.length = 0;
+    // drain events — relay discrete events (bonk/fall/finish/fire/...) to the
+    // other clients so their effects play. Each client's local sim already fires
+    // its own + the bots' events, so the client filters these to other humans.
+    const evs = this.sim.ev.splice(0);
+    if (evs.length) this.broadcast({ type: 'events', events: evs });
 
     // check for race end
     if (this.state === 'racing') {
@@ -341,6 +352,7 @@ class Room {
     }));
 
     this.broadcast({ type: 'raceEnd', ranking });
+    this.broadcastLobby(); // lobby UI: show results state + re-enable host settings
     console.log(`[Room ${this.code}] race ended`);
   }
 
