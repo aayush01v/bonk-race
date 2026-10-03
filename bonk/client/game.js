@@ -454,7 +454,6 @@ function onEvent(e) {
 
 /* ---------------- per-frame update ---------------- */
 function update(dt, t) {
-  if (isMP && !sim) return;
   const playing = mode === 'play';
   if (!paused) {
     const input = playing ? readInput() : null;
@@ -663,6 +662,7 @@ function render(t) {
 let last = performance.now(), failed = false;
 function frame(now) {
   requestAnimationFrame(frame);
+  if (isMP && !sim) return;
   let dt = (now - last) / 1000; last = now;
   if (!(dt > 0)) return;
   if (dt > 0.1) dt = 0.1;
