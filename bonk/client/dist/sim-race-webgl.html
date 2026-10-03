@@ -1562,13 +1562,13 @@ function onEvent(e) {
 function update(dt, t) {
   const playing = mode === 'play';
   if (!paused) {
+    const input = playing ? readInput() : null;
     if (isMP) {
-      if (playing && window.opener) window.opener.postMessage({ type: 'mp_input', input: readInput() }, '*');
-    } else {
-      sim.step(dt, playing ? readInput() : null);
+      if (playing && window.opener) window.opener.postMessage({ type: 'mp_input', input }, '*');
     }
+    sim.step(dt, input);
   }
-  if (playing && !isMP) { pulse.jump = false; pulse.dive = false; }
+  if (playing) { pulse.jump = false; pulse.dive = false; }
   for (let i = 0; i < sim.ev.length; i++) onEvent(sim.ev[i]);
   sim.ev.length = 0;
   stepParticles(dt);
@@ -1833,7 +1833,11 @@ if (isMP) {
       for (let i = 0; i < s.pickups.length; i++) if (sim.pickups[i]) sim.pickups[i].on = s.pickups[i].on;
     }
     else if (e.data.type === 'mp_events' && sim) {
-      sim.ev.push(...e.data.data);
+      const events = e.data.data.filter(ev => {
+        const p = sim.players[ev.id];
+        return p && !p.bot && ev.id !== me;
+      });
+      sim.ev.push(...events);
     }
   });
 } else {
