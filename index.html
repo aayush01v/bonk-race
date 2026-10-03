@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>Sim Race / Bonk — Test & Play Hub</title>
+<style>
+:root {
+  --ink: #2a1a5e;
+  --pink: #ff8fb8;
+  --lilac: #b79cff;
+  --yellow: #ffd23f;
+  --mint: #6fe3b8;
+  --sky: #8bd3ff;
+  --coral: #ff7a59;
+  --paper: #fffdf7;
+  --font: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Hiragino Maru Gothic ProN", Nunito, "Trebuchet MS", system-ui, sans-serif;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: #cfeaff;
+  font-family: var(--font);
+  color: var(--ink);
+  background-image: 
+    radial-gradient(circle at 15% 20%, rgba(255, 255, 255, 0.45) 0%, transparent 40%),
+    radial-gradient(circle at 85% 80%, rgba(255, 143, 184, 0.25) 0%, transparent 45%),
+    radial-gradient(circle at 50% 50%, rgba(111, 227, 184, 0.15) 0%, transparent 60%);
+}
+body {
+  padding: 24px 16px 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.container {
+  width: 100%;
+  max-width: 920px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+}
+
+/* Outlined 3D text */
+.outline {
+  --o: 3px;
+  text-shadow:
+    var(--o) 0 0 var(--ink), calc(-1*var(--o)) 0 0 var(--ink), 0 var(--o) 0 var(--ink), 0 calc(-1*var(--o)) 0 var(--ink),
+    var(--o) var(--o) 0 var(--ink), calc(-1*var(--o)) var(--o) 0 var(--ink),
+    var(--o) calc(-1*var(--o)) 0 var(--ink), calc(-1*var(--o)) calc(-1*var(--o)) 0 var(--ink),
+    0 calc(var(--o)*2.2) 0 var(--ink);
+}
+
+/* Header */
+header {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+#title {
+  margin: 0;
+  font-size: clamp(48px, 12vw, 84px);
+  line-height: 0.95;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+#title span {
+  display: inline-block;
+  color: var(--c);
+  transform: rotate(var(--r));
+  --o: 4px;
+  transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+#title span:hover {
+  transform: translateY(-8px) scale(1.15) rotate(calc(var(--r) * 1.5));
+}
+#title span.gap { width: 0.26em; }
+
+.subtitle {
+  font-size: clamp(16px, 3.5vw, 19px);
+  font-weight: 800;
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 999px;
+  padding: 8px 22px;
+  box-shadow: 0 5px 0 var(--ink);
+  margin: 4px 0 0;
+  text-align: center;
+}
+
+/* Status Banner */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #e2f7ec;
+  color: #125430;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 3px 0 var(--ink);
+}
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 2px var(--ink);
+  animation: pulse 1.8s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.2); }
+}
+
+/* Card Grid */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 20px;
+  width: 100%;
+}
+
+.card {
+  background: var(--paper);
+  border: 3.5px solid var(--ink);
+  border-radius: 24px;
+  box-shadow: 0 8px 0 var(--ink);
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  position: relative;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 0 var(--ink);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.card-title {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tag {
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--mint);
+  box-shadow: 0 2px 0 var(--ink);
+}
+.tag.yellow { background: var(--yellow); }
+.tag.lilac { background: var(--lilac); }
+.tag.sky { background: var(--sky); }
+
+.card-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+/* Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font: 900 20px var(--font);
+  padding: 14px 28px;
+  border-radius: 999px;
+  border: 3.5px solid var(--ink);
+  text-decoration: none;
+  color: var(--ink);
+  cursor: pointer;
+  box-shadow: 0 6px 0 var(--ink);
+  transition: transform 0.1s, box-shadow 0.1s;
+  text-align: center;
+}
+.btn:active {
+  transform: translateY(4px);
+  box-shadow: 0 2px 0 var(--ink);
+}
+.btn-primary { background: var(--yellow); }
+.btn-primary:hover { background: #ffe066; }
+.btn-secondary { background: var(--mint); }
+.btn-secondary:hover { background: #8ef7c7; }
+.btn-alt { background: var(--paper); font-size: 15px; padding: 8px 16px; box-shadow: 0 4px 0 var(--ink); }
+
+/* Flag options */
+.pill-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pill-btn {
+  font: 800 12px var(--font);
+  padding: 6px 12px;
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: 0 3px 0 var(--ink);
+  transition: transform 0.1s, background 0.1s;
+}
+.pill-btn:hover { background: var(--sky); }
+.pill-btn:active { transform: translateY(2px); box-shadow: 0 1px 0 var(--ink); }
+
+/* Codespace Share Panel */
+.share-panel {
+  background: #fbf7ee;
+  border: 3px dashed var(--ink);
+  border-radius: 18px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.share-url-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.share-input {
+  flex: 1;
+  font-family: monospace;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 9px 12px;
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.copy-btn {
+  font: 800 13px var(--font);
+  padding: 9px 16px;
+  background: var(--lilac);
+  border: 2px solid var(--ink);
+  border-radius: 12px;
+  cursor: pointer;
+  box-shadow: 0 3px 0 var(--ink);
+  white-space: nowrap;
+}
+.copy-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--ink);
+}
+
+/* Codespace instructions callout */
+.callout {
+  background: #fff9e6;
+  border-left: 6px solid var(--yellow);
+  border: 2px solid var(--ink);
+  border-left-width: 6px;
+  border-left-color: var(--yellow);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.5;
+  font-weight: 700;
+}
+.callout strong { color: var(--ink); }
+.callout ol { margin: 6px 0 0; padding-left: 18px; }
+.callout li { margin-bottom: 4px; }
+
+/* Keyboard & Controls */
+.controls-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+.control-item {
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 14px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 3px 0 var(--ink);
+}
+.control-action { font-size: 13px; font-weight: 800; }
+.keys { display: flex; gap: 4px; align-items: center; }
+kbd {
+  display: inline-block;
+  min-width: 1.8em;
+  padding: 2px 7px;
+  border: 2px solid var(--ink);
+  border-bottom-width: 4px;
+  border-radius: 8px;
+  background: #fff;
+  font: 800 12px var(--font);
+  text-align: center;
+  color: var(--ink);
+}
+
+/* QR Code Section */
+.qr-container {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: #fff;
+  border: 2px solid var(--ink);
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: 0 3px 0 var(--ink);
+}
+#qrCanvas {
+  width: 110px;
+  height: 110px;
+  border-radius: 10px;
+  border: 2px solid var(--ink);
+  background: #fff;
+  display: block;
+}
+.qr-text {
+  font-size: 13px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+/* Course Stages Tour */
+.stage-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stage-pill {
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 12px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 2px 0 var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.stage-num {
+  background: var(--ink);
+  color: #fff;
+  border-radius: 50%;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+}
+
+/* Embedded preview modal / container */
+#previewContainer {
+  display: none;
+  width: 100%;
+  height: 700px;
+  border: 3.5px solid var(--ink);
+  border-radius: 20px;
+  overflow: hidden;
+  box-shadow: 0 8px 0 var(--ink);
+  background: #cfeaff;
+  position: relative;
+}
+#previewIframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+  display: block;
+}
+#closePreviewBtn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 10;
+}
+
+footer {
+  text-align: center;
+  font-size: 13px;
+  font-weight: 800;
+  opacity: 0.85;
+  margin-top: 10px;
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- Header -->
+  <header>
+    <div class="status-badge" id="envBadge">
+      <span class="status-dot"></span>
+      <span id="envText">Ready for Testing</span>
+    </div>
+    <h1 id="title" class="outline" aria-label="Sim Race">
+      <span aria-hidden="true" style="--c:#ff8fb8;--r:-5deg">B</span><span aria-hidden="true" style="--c:#ffd23f;--r:4deg">O</span><span aria-hidden="true" style="--c:#6fe3b8;--r:-3deg">N</span><span aria-hidden="true" style="--c:#ff7a59;--r:5deg">K</span><span class="gap"></span><span aria-hidden="true" style="--c:#b79cff;--r:3deg">R</span><span aria-hidden="true" style="--c:#8bd3ff;--r:-4deg">A</span><span aria-hidden="true" style="--c:#ffd23f;--r:2deg">C</span><span aria-hidden="true" style="--c:#ff8fb8;--r:-3deg">E</span>
+    </h1>
+    <p class="subtitle">3D Obstacle Course + Knockback Blaster Combat</p>
+  </header>
+
+  <!-- Live In-Page Preview Area (optional) -->
+  <div id="previewContainer">
+    <button id="closePreviewBtn" class="btn btn-alt">✖ Close Embedded Game</button>
+    <iframe id="previewIframe" src="about:blank"></iframe>
+  </div>
+
+  <!-- Main Game Launch Cards -->
+  <div class="grid">
+    <!-- Card 1: Babylon 3D Client -->
+    <div class="card" style="border-top: 10px solid var(--yellow);">
+      <div class="card-header">
+        <h2 class="card-title">🎮 Babylon.js 3D</h2>
+        <span class="tag yellow">Full 3D FX</span>
+      </div>
+      <p class="card-desc">
+        Modern 3D engine with dynamic sun shadows, glowing blaster pellets, character outlines, bounce pad reflections, and camera physics.
+      </p>
+
+      <a href="sim-race-babylon.html" class="btn btn-primary" id="launchBabylonBtn">
+        PLAY 3D CLIENT
+      </a>
+
+      <div style="font-size:12px; font-weight:800; color:var(--ink); margin-top:2px;">
+        Test Configurations:
+      </div>
+      <div class="pill-options">
+        <a href="sim-race-babylon.html?debug" class="pill-btn">🐛 With Debug HUD (?debug)</a>
+        <a href="sim-race-babylon.html?lowfx=1" class="pill-btn">📱 Mobile Low FX (?lowfx=1)</a>
+        <a href="sim-race-babylon.html?shadows=0&glow=0" class="pill-btn">⚡ Max FPS (?shadows=0)</a>
+        <a href="sim-race-babylon.html?inspector" class="pill-btn">🔍 Babylon Inspector</a>
+        <button class="pill-btn" onclick="openEmbedded('sim-race-babylon.html')">🖥️ Play Here (Embed)</button>
+      </div>
+    </div>
+
+    <!-- Card 2: WebGL1 Classic Client -->
+    <div class="card" style="border-top: 10px solid var(--mint);">
+      <div class="card-header">
+        <h2 class="card-title">⚡ WebGL1 Classic</h2>
+        <span class="tag">Standalone</span>
+      </div>
+      <p class="card-desc">
+        Pure hand-written WebGL1 renderer. Zero external CDN dependencies, runs 100% offline, guaranteed baseline compatibility on every device.
+      </p>
+
+      <a href="sim-race-webgl.html" class="btn btn-secondary">
+        PLAY WEBGL1 CLIENT
+      </a>
+
+      <div style="font-size:12px; font-weight:800; color:var(--ink); margin-top:2px;">
+        Quick Options:
+      </div>
+      <div class="pill-options">
+        <a href="sim-race-webgl.html" class="pill-btn">⚡ Standard Launch</a>
+        <button class="pill-btn" onclick="openEmbedded('sim-race-webgl.html')">🖥️ Play Here (Embed)</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Codespace Testing & Share Panel -->
+  <div class="card" style="width: 100%;">
+    <div class="card-header">
+      <h2 class="card-title">☁️ Codespaces Sharing & Testing Guide</h2>
+      <span class="tag lilac" id="hostTypeTag">Codespaces</span>
+    </div>
+
+    <div class="share-panel">
+      <div style="font-size:13px; font-weight:800;">🔗 Shareable Game Link for Testers & Phones:</div>
+      <div class="share-url-box">
+        <input type="text" id="shareUrlInput" class="share-input" readonly value="">
+        <button id="copyUrlBtn" class="copy-btn">📋 Copy Link</button>
+      </div>
+
+      <div class="callout">
+        <strong>⚠️ Crucial for Public Testing on GitHub Codespaces:</strong>
+        <ol>
+          <li>In your Codespace window, open the bottom panel and click the <strong>PORTS</strong> tab.</li>
+          <li>Find Port <strong>8000</strong> (labeled <em>Sim Race Game Launcher</em>).</li>
+          <li>Right-click it and change <strong>Port Visibility</strong> from <em>Private</em> to <strong>Public</strong>.</li>
+          <li>Once set to <strong>Public</strong>, anyone who clicks the link above or scans the QR code can play instantly without signing into GitHub!</li>
+        </ol>
+      </div>
+
+      <!-- Mobile QR Code -->
+      <div class="qr-container">
+        <canvas id="qrCanvas"></canvas>
+        <div class="qr-text">
+          <div style="font-size:14px; font-weight:900; margin-bottom:4px;">📱 Test on your Smartphone</div>
+          Point your phone camera at this QR code to load the game on mobile. The game includes touch joystick movement and jump/dive/fire buttons.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Controls Reference -->
+  <div class="card" style="width: 100%;">
+    <div class="card-header">
+      <h2 class="card-title">🕹️ Controls & Combat Mechanics</h2>
+      <span class="tag sky">Cheat Sheet</span>
+    </div>
+
+    <div class="controls-grid">
+      <div class="control-item">
+        <span class="control-action">Move / Steer</span>
+        <div class="keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>▲</kbd><kbd>▼</kbd><kbd>◄</kbd><kbd>►</kbd></div>
+      </div>
+      <div class="control-item">
+        <span class="control-action">Jump (Gap / Hazard)</span>
+        <div class="keys"><kbd>Space</kbd></div>
+      </div>
+      <div class="control-item">
+        <span class="control-action">Dive & Flop (Knockback)</span>
+        <div class="keys"><kbd>Shift</kbd> or <kbd>K</kbd></div>
+      </div>
+      <div class="control-item">
+        <span class="control-action">Blaster (Shoot Pellet)</span>
+        <div class="keys"><kbd>F</kbd> or <kbd>J</kbd></div>
+      </div>
+      <div class="control-item">
+        <span class="control-action">Restart Race</span>
+        <div class="keys"><kbd>R</kbd></div>
+      </div>
+      <div class="control-item">
+        <span class="control-action">Main Menu</span>
+        <div class="keys"><kbd>Esc</kbd></div>
+      </div>
+    </div>
+
+    <p class="card-desc" style="margin-top:4px;">
+      💥 <strong>Knockback rules:</strong> Nobody dies! Bullets and dives stun and shove opponents off the track. Falling off respawns racers at their last checkpoint. Glowing yellow orbs on the track refill +3 blaster ammo.
+    </p>
+  </div>
+
+  <!-- Course Tour -->
+  <div class="card" style="width: 100%;">
+    <div class="card-header">
+      <h2 class="card-title">🏁 Course Anatomy (193m Track)</h2>
+      <span class="tag">7 Checkpoints</span>
+    </div>
+
+    <div class="stage-pills">
+      <div class="stage-pill"><span class="stage-num">1</span> Start Slab (z: 0-9)</div>
+      <div class="stage-pill"><span class="stage-num">2</span> Spinner Alley (z: 9-45)</div>
+      <div class="stage-pill"><span class="stage-num">3</span> Gap & Rest Slab (z: 48)</div>
+      <div class="stage-pill"><span class="stage-num">4</span> Sliding Platforms (z: 56-67)</div>
+      <div class="stage-pill"><span class="stage-num">5</span> Crumble Tiles (z: 70-82)</div>
+      <div class="stage-pill"><span class="stage-num">6</span> Pusher Bridge (z: 90-120)</div>
+      <div class="stage-pill"><span class="stage-num">7</span> Bounce Launch Pad (z: 125)</div>
+      <div class="stage-pill"><span class="stage-num">8</span> Giant Spinning Disc (z: 152-162)</div>
+      <div class="stage-pill"><span class="stage-num">9</span> Final Spinner & Finish (z: 183)</div>
+    </div>
+  </div>
+
+  <footer>
+    Bonk Race (Sim Race) • Pair-programmed with Antigravity
+  </footer>
+
+</div>
+
+<script>
+// Detect URL and host environment
+const currentUrl = window.location.href;
+const shareInput = document.getElementById('shareUrlInput');
+const hostTypeTag = document.getElementById('hostTypeTag');
+const envText = document.getElementById('envText');
+
+shareInput.value = currentUrl;
+
+if (window.location.hostname.includes('app.github.dev') || window.location.hostname.includes('github.dev')) {
+  hostTypeTag.textContent = 'GitHub Codespaces';
+  envText.textContent = 'Active on GitHub Codespaces';
+} else if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+  hostTypeTag.textContent = 'Local Dev Server';
+  envText.textContent = 'Running locally (Port ' + (window.location.port || '8000') + ')';
+} else {
+  hostTypeTag.textContent = 'Hosted Web';
+  envText.textContent = 'Online: ' + window.location.hostname;
+}
+
+// Copy URL Button
+document.getElementById('copyUrlBtn').addEventListener('click', () => {
+  navigator.clipboard.writeText(shareInput.value).then(() => {
+    const btn = document.getElementById('copyUrlBtn');
+    const oldText = btn.textContent;
+    btn.textContent = '✅ Copied!';
+    setTimeout(() => { btn.textContent = oldText; }, 2000);
+  });
+});
+
+// Embedded game iframe controls
+function openEmbedded(url) {
+  const container = document.getElementById('previewContainer');
+  const iframe = document.getElementById('previewIframe');
+  iframe.src = url;
+  container.style.display = 'block';
+  container.scrollIntoView({ behavior: 'smooth' });
+}
+document.getElementById('closePreviewBtn').addEventListener('click', () => {
+  const container = document.getElementById('previewContainer');
+  const iframe = document.getElementById('previewIframe');
+  iframe.src = 'about:blank';
+  container.style.display = 'none';
+});
+
+// Lightweight QR code generator on canvas
+// Uses an image-free vector draw or QR API fallback
+(function generateQR() {
+  const canvas = document.getElementById('qrCanvas');
+  const ctx = canvas.getContext('2d');
+  canvas.width = 220;
+  canvas.height = 220;
+
+  // Attempt to fetch QR code image from qrserver API
+  const qrImg = new Image();
+  qrImg.crossOrigin = 'anonymous';
+  const encodedUrl = encodeURIComponent(currentUrl);
+  qrImg.src = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodedUrl + '&margin=8';
+
+  qrImg.onload = () => {
+    ctx.drawImage(qrImg, 0, 0, 220, 220);
+  };
+  qrImg.onerror = () => {
+    // Fallback: draw a pleasant patterned placeholder
+    ctx.fillStyle = '#fffdf7';
+    ctx.fillRect(0, 0, 220, 220);
+    ctx.fillStyle = '#2a1a5e';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Scan link above', 110, 110);
+  };
+})();
+</script>
+</body>
+</html>

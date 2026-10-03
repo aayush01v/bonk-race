@@ -1,0 +1,23 @@
+{
+  "name": "bonk-sim-race",
+  "version": "1.0.0",
+  "description": "Browser low-poly 3D obstacle race game with knockback combat",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "serve": "node server.js",
+    "serve:py": "python3 -m http.server 8000",
+    "build": "python3 bonk/client/build.py",
+    "test": "node bonk/tests.js"
+  },
+  "keywords": [
+    "game",
+    "babylonjs",
+    "webgl",
+    "multiplayer",
+    "obstacle-course",
+    "codespace"
+  ],
+  "author": "",
+  "license": "MIT"
+}

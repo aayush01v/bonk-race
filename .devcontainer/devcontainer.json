@@ -1,0 +1,24 @@
+{
+  "name": "Sim Race (Bonk) Game Server",
+  "image": "mcr.microsoft.com/devcontainers/universal:2",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "Sim Race Game Launcher",
+      "onAutoForward": "openBrowser",
+      "visibility": "public"
+    }
+  },
+  "postStartCommand": "nohup python3 -m http.server 8000 > /tmp/game-server.log 2>&1 &",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "ms-python.python",
+        "ritwickdey.LiveServer"
+      ]
+    }
+  }
+}

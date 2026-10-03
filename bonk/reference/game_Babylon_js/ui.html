@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Sim Race</title>
+<style>
+:root{
+  --ink:#2a1a5e; --pink:#ff8fb8; --lilac:#b79cff; --yellow:#ffd23f; --mint:#6fe3b8;
+  --sky:#8bd3ff; --coral:#ff7a59; --paper:#fffdf7;
+  --font: ui-rounded, "SF Pro Rounded", "Arial Rounded MT Bold", "Hiragino Maru Gothic ProN", Nunito, "Trebuchet MS", system-ui, sans-serif;
+  --st: env(safe-area-inset-top, 0px); --sr: env(safe-area-inset-right, 0px);
+  --sb: env(safe-area-inset-bottom, 0px); --sl: env(safe-area-inset-left, 0px);
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;overflow:hidden;background:#cfeaff;font-family:var(--font);color:var(--ink);
+  overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none}
+#gl{position:fixed;inset:0;width:100%;height:100%;display:block}
+.hidden{display:none !important}
+button{font-family:var(--font);color:var(--ink)}
+button:focus-visible{outline:4px solid #fff;outline-offset:3px}
+
+/* outlined display text */
+.outline{--o:3px;text-shadow:
+  var(--o) 0 0 var(--ink), calc(-1*var(--o)) 0 0 var(--ink), 0 var(--o) 0 var(--ink), 0 calc(-1*var(--o)) 0 var(--ink),
+  var(--o) var(--o) 0 var(--ink), calc(-1*var(--o)) var(--o) 0 var(--ink),
+  var(--o) calc(-1*var(--o)) 0 var(--ink), calc(-1*var(--o)) calc(-1*var(--o)) 0 var(--ink),
+  0 calc(var(--o)*2.4) 0 var(--ink)}
+
+/* ---------- screens ---------- */
+.screen{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:14px;padding:calc(16px + var(--st)) calc(16px + var(--sr)) calc(16px + var(--sb)) calc(16px + var(--sl));overflow:auto;touch-action:pan-y}
+.sheet{display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;max-width:520px;margin:auto}
+#title{margin:0 0 2px;font-size:clamp(56px,19vw,120px);line-height:.95;font-weight:900;letter-spacing:-.02em;text-align:center;white-space:nowrap}
+#title span{display:inline-block;color:var(--c);transform:rotate(var(--r));--o:4px}
+#title span.gap{width:.26em}
+.note{background:rgba(255,253,247,.94);border:3px solid var(--ink);border-radius:20px;padding:10px 16px;
+  font-weight:700;font-size:15px;line-height:1.4;text-align:center;max-width:440px;margin:0}
+#picker{display:flex;gap:10px;flex-wrap:wrap;justify-content:center;padding:6px 2px 4px}
+.chip{position:relative;width:54px;height:54px;border-radius:50%;border:3px solid var(--ink);background:var(--c);
+  box-shadow:0 5px 0 var(--ink);cursor:pointer;padding:0;transition:transform .12s}
+.chip::before,.chip::after{content:"";position:absolute;top:19px;width:11px;height:14px;border-radius:50%;background:#fff;border:2px solid var(--ink)}
+.chip::before{left:11px}.chip::after{right:11px}
+.chip[aria-checked="true"]{transform:translateY(-6px) scale(1.1);box-shadow:0 0 0 4px #fff,0 0 0 7px var(--ink),0 11px 0 7px var(--ink)}
+#pickName{font-weight:900;font-size:19px;min-height:1.3em;background:var(--paper);border:3px solid var(--ink);border-radius:999px;padding:3px 16px}
+.big{font:900 28px var(--font);padding:14px 46px;border-radius:999px;border:4px solid var(--ink);background:var(--yellow);
+  box-shadow:0 7px 0 var(--ink);cursor:pointer;margin:4px 0 8px}
+.big:active{transform:translateY(5px);box-shadow:0 2px 0 var(--ink)}
+.alt{font:800 17px var(--font);padding:11px 22px;border-radius:999px;border:3px solid var(--ink);background:var(--paper);
+  box-shadow:0 5px 0 var(--ink);cursor:pointer}
+.alt:active{transform:translateY(4px);box-shadow:0 1px 0 var(--ink)}
+#how{font-weight:700;font-size:14px;line-height:1.55;text-align:center;max-width:440px;background:rgba(255,253,247,.86);
+  border:3px solid var(--ink);border-radius:18px;padding:9px 14px}
+#how p{margin:0}#how p+p{margin-top:6px}
+kbd{display:inline-block;min-width:1.7em;padding:1px 7px;border:2px solid var(--ink);border-bottom-width:4px;border-radius:8px;
+  background:#fff;font:800 12px var(--font);text-align:center}
+.tch{display:none}
+body.touch .desk{display:none}
+body.touch .tch{display:block}
+@media (max-width:430px){
+  #picker{gap:8px}
+  .chip{width:48px;height:48px}
+  .chip::before,.chip::after{top:16px;width:10px;height:13px}
+  .chip::before{left:9px}.chip::after{right:9px}
+}
+@media (max-height:520px){
+  #title{font-size:58px}.note{display:none}.sheet{gap:8px}.big{padding:9px 36px;font-size:24px}
+}
+
+/* ---------- HUD ---------- */
+#hud{position:fixed;inset:0;pointer-events:none;padding:calc(10px + var(--st)) calc(12px + var(--sr)) 0 calc(12px + var(--sl))}
+.pill{background:var(--paper);border:3px solid var(--ink);border-radius:999px;box-shadow:0 4px 0 var(--ink);
+  padding:5px 14px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap}
+#hudTop{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+#place{display:flex;align-items:baseline;gap:6px;font-size:26px;min-width:92px;justify-content:center}
+#place small{font-size:13px;font-weight:800;opacity:.65}
+#timer{font-size:20px}
+#tools{display:flex;gap:8px;pointer-events:auto}
+.round{position:relative;width:42px;height:42px;border-radius:50%;border:3px solid var(--ink);background:var(--paper);
+  box-shadow:0 4px 0 var(--ink);font:900 20px/1 var(--font);cursor:pointer;padding:0}
+.round:active{transform:translateY(3px);box-shadow:0 1px 0 var(--ink)}
+.round.off::after{content:"";position:absolute;left:7px;right:7px;top:50%;height:4px;margin-top:-2px;background:var(--coral);
+  border:2px solid var(--ink);border-radius:4px;transform:rotate(-40deg);box-sizing:content-box;height:2px}
+#track{position:relative;height:16px;margin:14px 8px 0;background:rgba(255,253,247,.85);border:3px solid var(--ink);border-radius:999px}
+#track::after{content:"";position:absolute;right:-3px;top:-6px;bottom:-6px;width:10px;border:3px solid var(--ink);border-radius:5px;
+  background:repeating-conic-gradient(var(--ink) 0 25%,#fff 0 50%) 0 0/8px 8px}
+.dot{position:absolute;top:50%;width:16px;height:16px;margin:-8px 0 0 -8px;border-radius:50%;border:2px solid var(--ink);background:var(--c)}
+.dot.me{width:24px;height:24px;margin:-12px 0 0 -12px;border-width:3px;z-index:2}
+#ammo{margin-top:12px;display:inline-flex;gap:6px;padding:7px 11px}
+#ammo i{width:13px;height:13px;border-radius:50%;border:2px solid var(--ink)}
+#ammo i.on{background:var(--yellow)}
+#count{position:fixed;left:0;right:0;top:27%;text-align:center;font-weight:900;font-size:min(36vw,210px);line-height:1;
+  pointer-events:none;color:var(--c,#ffd23f);--o:7px}
+#count.c3{--c:var(--pink)}#count.c2{--c:var(--yellow)}#count.c1{--c:var(--mint)}#count.go{--c:#fff}
+#count.pop{animation:pop .55s cubic-bezier(.2,1.5,.4,1) both}
+@keyframes pop{0%{transform:scale(.3);opacity:0}60%{opacity:1}100%{transform:scale(1);opacity:1}}
+#toast{position:fixed;left:50%;top:calc(21% + 4px);transform:translateX(-50%);pointer-events:none;opacity:0;font-size:20px}
+#toast.show{animation:toast 1.5s ease both}
+@keyframes toast{0%{opacity:0;transform:translate(-50%,10px)}12%{opacity:1;transform:translate(-50%,0)}80%{opacity:1}100%{opacity:0}}
+#veil{position:fixed;inset:0;background:#fffdf7;opacity:0;pointer-events:none;transition:opacity .35s}
+#veil.on{opacity:1}
+
+/* ---------- touch controls ---------- */
+#touch{position:fixed;inset:0;pointer-events:none}
+#joyZone{position:absolute;left:0;bottom:0;width:55%;height:64%;pointer-events:auto;touch-action:none}
+#joyBase{position:absolute;width:132px;height:132px;margin:-66px 0 0 -66px;border-radius:50%;border:3px solid var(--ink);
+  background:rgba(255,253,247,.4);opacity:0;transition:opacity .12s;pointer-events:none}
+#joyKnob{position:absolute;left:50%;top:50%;width:58px;height:58px;margin:-29px 0 0 -29px;border-radius:50%;background:var(--paper);
+  border:3px solid var(--ink);box-shadow:0 4px 0 var(--ink)}
+.tbtn{position:absolute;pointer-events:auto;touch-action:none;border-radius:50%;border:4px solid var(--ink);font:900 17px var(--font);
+  box-shadow:0 6px 0 var(--ink);display:flex;align-items:center;justify-content:center;padding:0}
+.tbtn.down{transform:translateY(5px);box-shadow:0 1px 0 var(--ink)}
+#bJump{right:calc(18px + var(--sr));bottom:calc(34px + var(--sb));width:98px;height:98px;background:var(--mint);font-size:21px}
+#bDive{right:calc(128px + var(--sr));bottom:calc(34px + var(--sb));width:70px;height:70px;background:var(--pink)}
+#bFire{right:calc(32px + var(--sr));bottom:calc(146px + var(--sb));width:70px;height:70px;background:var(--yellow)}
+
+/* ---------- results ---------- */
+.card{background:var(--paper);border:4px solid var(--ink);border-radius:28px;box-shadow:0 8px 0 var(--ink);
+  padding:18px 18px 20px;width:min(420px,100%);margin:auto;text-align:center}
+.card h2{margin:0;font-size:clamp(34px,10vw,48px);line-height:1}
+.card p{margin:8px 0 0;font-weight:800}
+#resList{list-style:none;margin:14px 0 16px;padding:0;text-align:left}
+#resList li{display:grid;grid-template-columns:24px 20px 1fr auto;gap:8px;align-items:center;padding:6px 8px;border-radius:12px;
+  font-weight:800;font-variant-numeric:tabular-nums}
+#resList li.me{background:#ffe9a8}
+#resList i{width:18px;height:18px;border-radius:50%;border:2px solid var(--ink);background:var(--c)}
+#resList em{font-style:normal;opacity:.7}
+.btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.btns .big{font-size:22px;padding:11px 28px;margin:0}
+#backdrop{position:fixed;inset:0;background:rgba(42,26,94,.28)}
+
+@media (prefers-reduced-motion:reduce){
+  #count.pop,#toast.show{animation-duration:.01s}
+}
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div id="hud" class="hidden">
+  <div id="hudTop">
+    <div id="place" class="pill"><b id="placeN">Ready</b><small id="placeOf"></small></div>
+    <div id="timer" class="pill">0:00.0</div>
+    <div id="tools">
+      <button id="btnRestart" class="round" tabindex="-1" aria-label="Restart race">&#8635;</button>
+      <button id="btnMute" class="round" tabindex="-1" aria-label="Toggle sound">&#9834;</button>
+    </div>
+  </div>
+  <div id="track"></div>
+  <div id="ammo" class="pill hidden" aria-label="Blaster ammo"><i></i><i></i><i></i><i></i><i></i></div>
+  <div id="count" class="outline"></div>
+  <div id="toast" class="pill"></div>
+</div>
+
+<div id="touch" class="hidden">
+  <div id="joyZone"></div>
+  <div id="joyBase"><div id="joyKnob"></div></div>
+  <div id="bFire" class="tbtn">Fire</div>
+  <div id="bDive" class="tbtn">Dive</div>
+  <div id="bJump" class="tbtn">Jump</div>
+</div>
+
+<div id="menu" class="screen">
+  <div class="sheet">
+    <h1 id="title" class="outline" aria-label="Sim Race">
+      <span aria-hidden="true" style="--c:#ff8fb8;--r:-5deg">S</span><span aria-hidden="true" style="--c:#ffd23f;--r:4deg">I</span><span aria-hidden="true" style="--c:#6fe3b8;--r:-3deg">M</span><span class="gap"></span><span aria-hidden="true" style="--c:#b79cff;--r:3deg">R</span><span aria-hidden="true" style="--c:#8bd3ff;--r:-4deg">A</span><span aria-hidden="true" style="--c:#ff7a59;--r:5deg">C</span><span aria-hidden="true" style="--c:#ffd23f;--r:-2deg">E</span>
+    </h1>
+    <p class="note">Beat five bots through spinner alley, sliding platforms, crumbling tiles, a pusher bridge and a bounce pad.</p>
+    <div id="picker" role="radiogroup" aria-label="Pick your racer"></div>
+    <div id="pickName"></div>
+    <button id="btnPlay" class="big">Play</button>
+    <div id="how">
+      <p class="desk"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows move, <kbd>Space</kbd> jump, <kbd>Shift</kbd> dive, <kbd>F</kbd> blaster</p>
+      <p class="tch">Drag on the left to move. Buttons on the right jump, dive and fire.</p>
+      <p>Dive into rivals to flop them. Glowing orbs reload your blaster. Fall off and you restart at your last checkpoint.</p>
+    </div>
+  </div>
+</div>
+
+<div id="results" class="screen hidden">
+  <div id="backdrop"></div>
+  <div class="card" style="position:relative">
+    <h2 id="resHead" class="outline" style="color:var(--yellow);--o:3px">Finished</h2>
+    <p id="resSub"></p>
+    <ol id="resList"></ol>
+    <div class="btns">
+      <button id="btnAgain" class="big">Race again</button>
+      <button id="btnMenu" class="alt">Change racer</button>
+    </div>
+  </div>
+</div>
+
+<div id="err" class="screen hidden">
+  <div class="card"><h2>Can't start</h2><p id="errMsg"></p></div>
+</div>
+<div id="veil"></div>
+
+<!--@GL-->
+<!--@SIM-->
+<!--@GAME-->
+</body>
+</html>
