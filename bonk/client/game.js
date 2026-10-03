@@ -693,7 +693,11 @@ if (isMP) {
         }
       }
       sim.humanId = me;
-      sim.players = d.roster.map(r => ({ ...r, x:0, y:0, z:0, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 }));
+      sim.players = d.roster.map(r => {
+        const p = { ...r, x:0, y:0, z:0, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 };
+        if (p.bot) p.ai = { skill: p.skill || 0.8, lane: (Math.random() - 0.5) * 6, ph: Math.random() * 6.28, look: 2.2 + Math.random() * 1.2, react: 0, jcd: 0, dcd: 0, fcd: 0 };
+        return p;
+      });
       vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
       flags = [];
       for (let i = 1; i < sim.cps.length; i++) {
