@@ -1295,6 +1295,7 @@ const clouds = [];
 let myKind = 'zombie', sim = null, me = 0, vis = [], dots = [], flags = [], mode = 'menu', best = null;
 let lastN = 0, resultsAt = 0, resultsShown = false, listT = 0, touchOn = false, veilOn = false, paused = false;
 const cam = { x: 0, y: 0, z: 0, init: false, shake: 0, fov: 60 };
+const isMP = typeof location !== 'undefined' && location.search.includes('mp=1');
 
 function makeSim() {
   const s = Sim.create((Math.random() * 1e9) | 0);
@@ -1560,8 +1561,14 @@ function onEvent(e) {
 /* ---------------- per-frame update ---------------- */
 function update(dt, t) {
   const playing = mode === 'play';
-  if (!paused) sim.step(dt, playing ? readInput() : null);
-  if (playing) { pulse.jump = false; pulse.dive = false; }
+  if (!paused) {
+    if (isMP) {
+      if (playing && window.opener) window.opener.postMessage({ type: 'mp_input', input: readInput() }, '*');
+    } else {
+      sim.step(dt, playing ? readInput() : null);
+    }
+  }
+  if (playing && !isMP) { pulse.jump = false; pulse.dive = false; }
   for (let i = 0; i < sim.ev.length; i++) onEvent(sim.ev[i]);
   sim.ev.length = 0;
   stepParticles(dt);
@@ -1769,7 +1776,62 @@ function frame(now) {
 }
 document.addEventListener('visibilitychange', () => { last = performance.now(); });
 
-pick(myKind);
+if (isMP) {
+  $('menu').classList.add('hidden');
+  if (window.opener) window.opener.postMessage({ type: 'mp_ready' }, '*');
+  window.addEventListener('message', e => {
+    if (!e.data || !e.data.type) return;
+    if (e.data.type === 'mp_init') {
+      audioInit();
+      const d = e.data.data;
+      me = d.simPlayerId;
+      myKind = d.roster.find(p => p.id === me)?.kind || 'zombie';
+      sim = Sim.create(d.seed);
+      sim.humanId = me;
+      sim.players = d.roster.map(r => ({ ...r, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 }));
+      vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
+      flags = [];
+      for (let i = 1; i < sim.cps.length; i++) {
+        const sl = sim.solids.find(o => o.cp === i);
+        if (sl) flags.push({ i, x: sl.cx - (sl.hx - 0.6), y: sl.cy + sl.hy, z: sl.cz - sl.hz + 1.2 });
+      }
+      const fin = sim.solids.find(o => o.name === 'finish'), sta = sim.solids.find(o => o.name === 'start');
+      world.finishTop = fin ? fin.cy + fin.hy : 3; world.startTop = sta ? sta.cy + sta.hy : 0;
+      P.life.fill(0);
+      mode = 'play'; cam.init = false; cam.shake = 0; lastN = 0; resultsAt = 0; resultsShown = false;
+      clearInput();
+      $('hud').classList.remove('hidden');
+      $('touch').classList.toggle('hidden', !touchOn);
+      veilOn = false; $('veil').classList.remove('on'); $('count').textContent = ''; $('ammo').classList.remove('hidden');
+      buildDots();
+    }
+    else if (e.data.type === 'mp_state' && sim) {
+      const s = e.data.data;
+      sim.t = s.t; sim.raceT = s.raceT; sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
+      for (let i = 0; i < s.players.length; i++) {
+        const p = sim.players[i], sp = s.players[i];
+        if (!p || !sp) continue;
+        p.x = sp.x; p.y = sp.y; p.z = sp.z; p.vx = sp.vx; p.vy = sp.vy; p.vz = sp.vz; p.yaw = sp.yaw;
+        p.ground = sp.ground >= 0 ? sim.solids[sp.ground] : null;
+        p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
+        p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
+        p.place = sp.place; p.falls = sp.falls; p.bonks = sp.bonks;
+      }
+      for (const st of s.tiles) {
+        const tl = sim.solids[st.id];
+        if (tl) { tl.state = st.state; tl.cy = st.cy; tl.active = st.active; }
+      }
+      sim.bullets = s.bullets;
+      for (let i = 0; i < s.pickups.length; i++) if (sim.pickups[i]) sim.pickups[i].on = s.pickups[i].on;
+    }
+    else if (e.data.type === 'mp_events' && sim) {
+      sim.ev.push(...e.data.data);
+    }
+  });
+} else {
+  pick(myKind);
+}
+
 requestAnimationFrame(frame);
 window.__race = { get sim() { return sim; }, get mode() { return mode; }, get me() { return me; }, start: startGame, menu: goMenu, pause(v) { paused = !!v; } };
 })();
