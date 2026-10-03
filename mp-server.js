@@ -186,6 +186,14 @@ class Room {
     this.seed = (Math.random() * 1e9) | 0;
     this.sim = Sim.create(this.seed);
 
+    if (this.settings) {
+      for (const s of this.sim.solids) {
+        if (s.kind === 'spin' && this.settings.spinnerSpeed !== undefined) s.om *= this.settings.spinnerSpeed;
+        if (s.kind === 'crumble' && this.settings.crumbleHold !== undefined) s.timer = this.settings.crumbleHold;
+        if (s.bounce && this.settings.bounceForce !== undefined) s.bounce = this.settings.bounceForce;
+      }
+    }
+
     // add human players
     const KINDS = ['zombie', 'pumpkin', 'ghost', 'robot', 'gum', 'banana'];
     let slot = 0;

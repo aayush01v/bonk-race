@@ -681,8 +681,16 @@ if (isMP) {
       me = d.simPlayerId;
       myKind = d.roster.find(p => p.id === me)?.kind || 'zombie';
       sim = Sim.create(d.seed);
+      // Apply room settings to matching objects
+      if (d.settings) {
+        for (const s of sim.solids) {
+          if (s.kind === 'spin' && d.settings.spinnerSpeed !== undefined) s.om *= d.settings.spinnerSpeed;
+          if (s.kind === 'crumble' && d.settings.crumbleHold !== undefined) s.timer = d.settings.crumbleHold; // default shake timer is in sim.js, but we update state from server anyway
+          if (s.bounce && d.settings.bounceForce !== undefined) s.bounce = d.settings.bounceForce;
+        }
+      }
       sim.humanId = me;
-      sim.players = d.roster.map(r => ({ ...r, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 }));
+      sim.players = d.roster.map(r => ({ ...r, x:0, y:0, z:0, vx:0, vy:0, vz:0, yaw:0, ground:null, stun:0, getup:0, flop:1, diveT:0, ammo:0, cp:0, finished:false, finishT:0, place:0, falls:0, bonks:0 }));
       vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
       flags = [];
       for (let i = 1; i < sim.cps.length; i++) {
