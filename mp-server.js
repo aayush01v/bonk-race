@@ -256,27 +256,7 @@ class Room {
       if (p && !p.bot) p._mpInput = c.input;
     }
 
-    // step the sim — we override the input routing
-    const origStep = () => {
-      const simDt = Math.min(dt, 1 / 20);
-      const n = Math.max(1, Math.ceil(simDt / (1 / 60))), h = simDt / n;
-      for (let i = 0; i < n; i++) {
-        this.sim.t += h;
-        if (this.sim.phase === 'countdown') {
-          this.sim.cd -= h;
-          if (this.sim.cd <= 0) {
-            this.sim.phase = 'race';
-            this.sim.raceT = 0;
-            this.sim.ev.push({ t: 'go', id: -1, x: 0, y: 0, z: 0 });
-            this.state = 'racing';
-          }
-        } else if (this.sim.phase === 'race') {
-          this.sim.raceT += h;
-        }
-      }
-    };
-
-    // we call S.step with null human input since we handle per-player input in our patched sub
+    // we call S.step with null human input since we handle per-player input via _mpInput in sim.js
     this.sim.step(dt, null);
 
     // update phase tracking

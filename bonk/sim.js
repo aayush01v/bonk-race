@@ -524,7 +524,7 @@ function create(seed) {
       else p.ground = null;
     }
     for (const p of S.players) {
-      const inp = p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY);
+      const inp = p._mpInput || (p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY));
       stepPlayer(p, inp || EMPTY, dt);
     }
     separate(); stepBullets(dt); stepPickups(dt);
