@@ -1804,6 +1804,7 @@ function onEvent(e) {
 
 /* ---------------- per-frame update ---------------- */
 function update(dt, t) {
+  if (isMP && !sim) return;
   const playing = mode === 'play';
   if (!paused) {
     const input = playing ? readInput() : null;
@@ -1920,19 +1921,26 @@ if (isMP) {
     }
     else if (e.data.type === 'mp_state' && sim) {
       const s = e.data.data;
-      sim.t = s.t; sim.raceT = s.raceT; sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
+      if (Math.abs(sim.t - s.t) > 0.5) { sim.t = s.t; sim.raceT = s.raceT; }
+      sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
       for (let i = 0; i < s.players.length; i++) {
         const p = sim.players[i], sp = s.players[i];
         if (!p || !sp) continue;
-        p.x = sp.x; p.y = sp.y; p.z = sp.z; p.vx = sp.vx; p.vy = sp.vy; p.vz = sp.vz; p.yaw = sp.yaw;
-        p.ground = sp.ground >= 0 ? sim.solids[sp.ground] : null;
+        
+        const thresh = (i === me) ? 2.0 : 0.2; 
+        const dx = p.x - sp.x, dy = p.y - sp.y, dz = p.z - sp.z;
+        if (dx*dx + dy*dy + dz*dz > thresh) {
+          p.x = sp.x; p.y = sp.y; p.z = sp.z; p.vx = sp.vx; p.vy = sp.vy; p.vz = sp.vz; p.yaw = sp.yaw;
+          p.ground = sp.ground >= 0 ? sim.solids[sp.ground] : null;
+        }
+        
         p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
         p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
         p.place = sp.place; p.falls = sp.falls; p.bonks = sp.bonks;
       }
       for (const st of s.tiles) {
         const tl = sim.solids[st.id];
-        if (tl) { tl.state = st.state; tl.cy = st.cy; tl.active = st.active; }
+        if (tl) { tl.state = st.state; tl.active = st.active; }
       }
       sim.bullets = s.bullets;
       for (let i = 0; i < s.pickups.length; i++) if (sim.pickups[i]) sim.pickups[i].on = s.pickups[i].on;
