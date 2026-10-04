@@ -25,6 +25,24 @@ grounded-only velocity ease) and a new solo-arc regression test in
 reference sim; arc Δy < 0.2 u, takeoff Δvy < 2 u/s, landing ±2 ticks — with
 the fix: 0.07 u / 0.45 u/s; reverted: 0.56 u / 4.6 u/s). See README §10.
 
+**Playtest round 2** (2026-10-05) surfaced "actions don't render quickly,
+they render after a delay" in normal MP play on a real internet line. Root
+cause: the 1 Hz RTT probe was gated on the `?net=1` debug overlay, so in
+normal play `netStats.rtt` stayed -1 forever — the adaptive-delay target saw
+zero one-way latency (stayed line-independent at ~0.17 s) and the
+input-confirmation uplink gate clamped to the 33 ms floor, opening before the
+server had received the latest input on any line slower than ~LAN. The relay
+chain (iframe → lobby → server pong) was already fully wired; the probe
+simply never fired. Fixed by moving the probe out of the `netOn` gate
+(`update()` in `sim-race-webgl.html`): `?net=1` still only controls the
+overlay. Verified with a headless pipe repro driving the shipped
+`sendMPInput` + 1 Hz probe against a 30 Hz server sim (slow line, 167 ms
+one-way): probe ON measures RTT ~0.4 s, grows the interpolation delay to
+0.37 s (vs 0.18 s line-independent), and cuts stop-coast drift from 3.2 u to
+2.4 u in the first 300 ms; jump response stays at solo parity (the
+airborne layers already cover it). Residual stop-coast is the documented
+compromise of the confirmation-window design, not the probe.
+
 Remaining: manual playtest matrix (4.2) and the optional revert flag (4.3).
 
 ## Phase 1: Client smoothing fixes (highest impact, low risk, client-only)

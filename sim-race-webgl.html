@@ -1905,23 +1905,30 @@ function update(dt, t) {
   updateHud();
   if (resultsAt && !resultsShown && t >= resultsAt) showResults();
   else if (resultsShown && t >= listT) { listT = t + 0.4; fillResList(); }
-  if (isMP && netOn && t - netStats.lastUi > 0.25) {
-    netStats.lastUi = t;
-    if (t - netStats.lastPing > 1 && mpHost) {  // RTT probe, 1/s
+  if (isMP) {
+    // RTT probe, 1/s — this must run in normal play, not only with ?net=1:
+    // both consumers of netStats.rtt (the adaptive-delay target and the
+    // input-confirmation uplink gate in applyNet) fall back to wrong values
+    // while rtt stays -1 (zero one-way latency, 33 ms uplink floor), which
+    // reads as "actions render after a delay" on any line slower than ~LAN.
+    if (t - netStats.lastPing > 1 && mpHost) {
       netStats.lastPing = t; netStats.pingTs = performance.now();
       mpHost.postMessage({ type: 'mp_ping', ts: netStats.pingTs }, '*');
     }
-    let p95 = 0;
-    if (netStats.gaps.length > 4) {
-      const g = netStats.gaps.slice().sort((a, b) => a - b);
-      p95 = g[(0.95 * g.length) | 0] || 0;
+    if (netOn && t - netStats.lastUi > 0.25) {
+      netStats.lastUi = t;
+      let p95 = 0;
+      if (netStats.gaps.length > 4) {
+        const g = netStats.gaps.slice().sort((a, b) => a - b);
+        p95 = g[(0.95 * g.length) | 0] || 0;
+      }
+      el.net.textContent =
+        'NET  rtt ' + (netStats.rtt < 0 ? '--' : Math.round(netStats.rtt)) + ' ms  ' +
+        'gap p95 ' + Math.round(p95) + ' ms  ' +
+        'snaps ' + netStats.snaps + '  ' +
+        'corr ' + netStats.corr.toFixed(2) + ' u  ' +
+        'delay ' + Math.round(interpDelay * 1000) + ' ms (tgt ' + Math.round(interpTarget * 1000) + ')';
     }
-    el.net.textContent =
-      'NET  rtt ' + (netStats.rtt < 0 ? '--' : Math.round(netStats.rtt)) + ' ms  ' +
-      'gap p95 ' + Math.round(p95) + ' ms  ' +
-      'snaps ' + netStats.snaps + '  ' +
-      'corr ' + netStats.corr.toFixed(2) + ' u  ' +
-      'delay ' + Math.round(interpDelay * 1000) + ' ms (tgt ' + Math.round(interpTarget * 1000) + ')';
   }
 }
 
