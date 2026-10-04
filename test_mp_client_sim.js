@@ -3,11 +3,13 @@
 // Extracts the shipped MP netcode from sim-race-webgl.html (INTERP_DELAY block:
 // snapBuf/lerpPair/applyNet/sendMPInput + resetNet) and runs it — unmodified —
 // against a real authoritative 30 Hz sim (bonk/sim.js) that quantizes and
-// delivers snapshots with one-tick latency. Verifies:
+// delivers snapshots with a 3-tick (100 ms) one-way latency. Verifies:
 //   1. remotes track the server's interpolated position (no 15-20 Hz velocity decay)
 //   2. the own player stays corrected within a small error band
 //   3. remote bullets are rebuilt by id and track the server
 //   4. own bullets survive the per-frame bullet rebuild when the server hasn't seen them yet
+//   5. own jump arcs match a no-netcode solo sim (arc Δy < 0.2 u, takeoff Δvy <
+//      2 u/s, landing ±2 ticks) — the "feels like solo" guard
 const fs = require('fs');
 const path = require('path');
 const Sim = require('./bonk/sim.js');
@@ -77,7 +79,7 @@ function resetAll() { resetNet(); lastNetPhase = ''; needHardSnapMe = false; net
 // srvOffset + performance.now(), which is only meaningful when wall time and
 // sim time advance together (a real browser). A frozen real clock would make
 // the client clock lag the server and inflate every error measured here.
-const factory = new Function('TAU', 'clamp', 'sim', 'me', 'mpHost', 'performance',
+const factory = new Function('TAU', 'Sim', 'clamp', 'sim', 'me', 'mpHost', 'performance',
   netBlock + '\n' + onStateSrc +
   '\nreturn { applyNet, lerpPair, sendMPInput, onState, resetAll, netStats, snapBuf, ' +
   'get interpDelay() { return interpDelay; }, get interpTarget() { return interpTarget; } };');
@@ -113,8 +115,21 @@ cl.players[2]._mpInput = NEUTRAL;
 cl.begin();
 cl.players[ME].ammo = 3; // for the local-only shot after the countdown (after begin(): reset() would zero it)
 
-const api = factory(Math.PI * 2, clamp, cl, ME, null, perfMock);
+// fake mp host: sendMPInput() must run its shipped path (including the
+// lastInpAt re-arm) exactly as update() drives it in the browser
+const sentInputs = [];
+const fakeHost = { postMessage: (msg) => sentInputs.push(msg) };
+const api = factory(Math.PI * 2, Sim, clamp, cl, ME, fakeHost, perfMock);
 api.resetAll();
+
+// solo reference: the exact non-MP experience — same seed/course, only Me,
+// same input timeline, no netcode. The arc assertions compare the MP client's
+// own player against THIS (the "feels like solo" baseline).
+const solo = Sim.create(SEED);
+solo.addPlayer({ name: 'Me', bot: false, kind: 'zombie', skill: 0 });
+solo.humanId = 0;
+solo.begin();
+solo.players[0].ammo = 3;
 
 // server history for interpolation at the client's render time
 const hist = { t: [], p: [[], [], []] };
@@ -158,42 +173,66 @@ function srvPosAt(id, t) { // linear interpolation in the tick history
 }
 
 // run the race: 30 Hz server tick, state broadcast every tick (shipped
-// STATE_EVERY = 1), client frame per tick with 1-tick delivery latency
+// STATE_EVERY = 1), client frame per tick with DELIVERY-tick one-way latency.
+// 3 ticks (100 ms) keeps the sample age realistic: at 1 tick with the virtual
+// 1:1 clock the samples arrive exactly on their own time (age ≈ 0) and the
+// correction degenerates to a no-op, which would not exercise the
+// input-confirmation gate / ballistic target / vy protection at all. The RTT
+// probe is simulated the same way test_mp_latency.js does (2× one-way).
+const DELIVERY = 3;
+const outQ = [];  // { at, snap } — delivery queue ordered by arrival tick
 const myInputDelay = []; // my local input, applied to the server one tick late
-let pending = null;
 const remoteErr = [], myErr = [], bulletErr = [];
 let vzDecayFrames = 0, vzFrames = 0;
 let ownBulletAliveWhileServerBlind = false;
-let simAcc = 0;
+let simAcc = 0, soloAcc = 0;
+// arc test: three full jumps on the flat start alley (z ~10/25/40). The remote
+// fires OUTSIDE this window (300–400) so no remote bullet can bonk Me mid-arc.
+const JUMP_TICKS = new Set([150, 210, 270]);
+const arc = [];  // per-tick { sFly, cFly, sy, cy, svy, cvy, stun, dead }
+
+api.netStats.rtt = Math.round(2 * DELIVERY * TICK * 1000);  // simulated probe (2× one-way)
 
 for (let tick = 1; tick <= N_TICKS; tick++) {
   vNowMs = tick * TICK * 1000;  // virtual wall clock tracks sim time (1 s sim = 1 s wall)
   // server: apply inputs (mine one tick late — models RTT), tick, maybe broadcast
   const myInp = myInputDelay.length ? myInputDelay.shift() : NEUTRAL;
   srv.players[ME]._mpInput = myInp;
-  // ~20 shots (fireCd 0.3). Bullets die fast on the spinner bars, so a few
+  // ~11 shots (fireCd 0.3). Bullets die fast on the spinner bars, so a few
   // shots yield too few "server still has it" frames to measure tracking.
-  srv.players[1]._mpInput = { mx: 0, mz: 1, jump: false, dive: false, fire: tick >= 100 && tick <= 280 };
+  // Window 300–400 keeps the bullet test data without bonking Me's arcs (150–270).
+  srv.players[1]._mpInput = { mx: 0, mz: 1, jump: false, dive: false, fire: tick >= 300 && tick <= 400 };
   srv.step(TICK, null);
   for (let i = 0; i < 3; i++) hist.p[i].push({ x: srv.players[i].x, y: srv.players[i].y, z: srv.players[i].z, vz: srv.players[i].vz });
   hist.t.push(srv.t);
-  pending = snapNow();  // 30 Hz state stream, like the shipped server
+  outQ.push({ at: tick + DELIVERY, snap: snapNow() });  // 30 Hz state stream, like the shipped server
 
-  // client frame: deliver the snapshot that left on the previous tick
-  if (pending) { api.onState(pending); pending = null; }
+  // client frame: deliver everything that has arrived (DELIVERY-tick one-way)
+  while (outQ.length && outQ[0].at <= tick) api.onState(outQ.shift().snap);
 
   // local input (prediction): forward always; one local-only shot after the
   // countdown (tick 95: cd is 3 s = 90 ticks) — the server never sees it,
-  // modeling an input the server hasn't acknowledged yet
-  const mine = { mx: 0, mz: 1, jump: false, dive: false, fire: tick === 95 };
+  // modeling an input the server hasn't acknowledged yet; three jump pulses
+  // for the solo-arc comparison
+  const mine = { mx: 0, mz: 1, jump: JUMP_TICKS.has(tick), dive: false, fire: tick === 95 };
   myInputDelay.push(tick === 95 ? { ...mine, fire: false } : mine);
 
+  // the shipped update() order: input out, then applyNet, then the local step
+  api.sendMPInput(mine);
   const remotes = api.applyNet(TICK);
   simAcc += TICK;
   let n = 0;
   while (simAcc >= STEP && n < 5) { cl.step(STEP, mine); simAcc -= STEP; n++; }
   // the client re-applies the remote interpolation after the local step
   for (const r of remotes) { r.p.x = r.x; r.p.y = r.y; r.p.z = r.z; r.p.vx = r.vx; r.p.vy = r.vy; r.p.vz = r.vz; r.p.yaw = r.yaw; }
+  // solo reference: identical sim, only Me, same input, no netcode
+  soloAcc += TICK;
+  let sn = 0;
+  while (soloAcc >= STEP && sn < 5) { solo.step(STEP, mine); soloAcc -= STEP; sn++; }
+  {
+    const sp = solo.players[0], cp = cl.players[ME];
+    arc.push({ sFly: !sp.ground, cFly: !cp.ground, sy: sp.y, cy: cp.y, svy: sp.vy, cvy: cp.vy, stun: cp.stun > 0, dead: cp.dead > 0 });
+  }
 
   // ── measurements (render time = cl.t - interpDelay, the live adaptive delay) ──
   const tI = cl.t - api.interpDelay;
@@ -229,7 +268,53 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
 const p95 = (a, q) => { const s = a.slice().sort((x, y) => x - y); return s[Math.max(0, ((q * s.length) | 0))] || 0; };
 const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
 
-console.log('client netcode vs authoritative sim (15 s, 1-tick input delay, 1-tick delivery):');
+// ── solo-arc analysis: does the MP client's own jump feel like the solo sim's? ──
+// Flight windows come from the SOLO reference (its ground state); each window is
+// clean if the client wasn't stunned/killed inside it (a bonk would make the
+// two sims legitimately differ). Per clean jump: max |Δy| over the flight,
+// |Δvy| over the first 4 ascent frames (the "stuck takeoff" signature), and the
+// landing-time offset in ticks.
+const flights = [];
+{
+  let i = 0;
+  while (i < arc.length) {
+    if (arc[i].sFly) {
+      let j = i;
+      while (j + 1 < arc.length && arc[j + 1].sFly) j++;
+      if (j - i >= 6) flights.push({ from: i, to: j });
+      i = j;
+    }
+    i++;
+  }
+}
+const cleanFlights = flights.filter(f => {
+  for (let i = f.from; i <= f.to; i++) if (arc[i].stun || arc[i].dead) return false;
+  return true;
+});
+let arcMaxDev = 0, takeoffDev = 0, landingOff = 0, arcDetails = [];
+for (const f of cleanFlights) {
+  let dev = 0, tv = 0;
+  for (let i = f.from; i <= f.to; i++) {
+    dev = Math.max(dev, Math.abs(arc[i].cy - arc[i].sy));
+    if (i - f.from < 4) tv = Math.max(tv, Math.abs(arc[i].cvy - arc[i].svy));
+  }
+  // landing: solo lands when sFly goes false; the client's crossing may differ
+  let clLanding = f.to;
+  for (let i = f.to; i >= Math.max(0, f.to - 5); i--) { if (!arc[i].cFly) { clLanding = i; break; } }
+  const lo = Math.abs(clLanding - f.to);
+  arcMaxDev = Math.max(arcMaxDev, dev);
+  takeoffDev = Math.max(takeoffDev, tv);
+  landingOff = Math.max(landingOff, lo);
+  arcDetails.push(`t=${f.from} maxDev ${dev.toFixed(2)}u takeoffΔvy ${tv.toFixed(2)} landing±${lo} tick`);
+}
+ok(cleanFlights.length >= 2, `arc test has clean jumps (${cleanFlights.length}/${flights.length} windows uncontaminated by stun/fall)`);
+if (cleanFlights.length >= 2) {
+  ok(arcMaxDev < 0.2, `own jump arc matches solo (max |Δy| ${arcMaxDev.toFixed(2)} u over ${cleanFlights.length} clean flights; ${arcDetails.join('; ')})`);
+  ok(takeoffDev < 2.0, `takeoff is not resisted (max ascent |Δvy| in first 4 frames: ${takeoffDev.toFixed(2)} u/s — without the input-confirmation gate the pre-jump sample drags vy back toward the ground)`);
+  ok(landingOff <= 2, `landing matches solo within ${landingOff} tick(s)`);
+}
+
+console.log(`client netcode vs authoritative sim (15 s, 1-tick input delay, ${DELIVERY}-tick delivery):`);
 ok(p95(remoteErr, 0.95) < 0.6, `remotes track server interpolation (p95 err ${p95(remoteErr, 0.95).toFixed(2)} u, mean ${mean(remoteErr).toFixed(2)} u over ${remoteErr.length} frames)`);
 ok(vzDecayFrames === 0, `no remote velocity decay: ${vzDecayFrames}/${vzFrames} frames with server vz>5 u/s but client vz<2.5`);
 ok(p95(myErr, 0.95) < 1.0, `own-player correction bounded (p95 ${p95(myErr, 0.95).toFixed(2)} u, mean ${mean(myErr).toFixed(2)} u)`);

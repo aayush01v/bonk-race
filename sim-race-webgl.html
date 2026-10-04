@@ -1098,7 +1098,7 @@ function create(seed) {
   return S;
 }
 
-return { create, K: { PR, PH, RUN, KILL_Y, MAX_AMMO } };
+return { create, K: { PR, PH, RUN, KILL_Y, MAX_AMMO, GRAV, JUMP_V } };
 })();
 if (typeof module !== 'undefined') module.exports = Sim;
 
@@ -1587,7 +1587,12 @@ let srvOffset = null;            // smoothed (server time - client wall seconds)
 const snapBuf = [];   // raw server 'state' snapshots, oldest first
 let netMine = null;   // last server sample of my player (correction target)
 let netMineDead = false, lastNetPhase = '', needHardSnapMe = false;
-let simAcc = 0, lastSentInp = null, lastSentAt = 0;
+let simAcc = 0, lastSentInp = null, lastSentAt = 0, lastInpAt = 0;
+// lastInpAt: sim time of the last REAL input (change or pulse) — the keep-alive
+// resend doesn't re-arm it. Drives the input-confirmation window in applyNet:
+// until the server has had uplink time to receive it and broadcast it, no state
+// sample can contain that input, so correcting toward one would pull the local
+// prediction backward (the "sticky jump" tug on takeoff).
 // Remote fire/jump/dive VFX are held until the remote's interpolated position
 // actually reaches the event's spot (flushNetEvents), not fired on arrival.
 const evQueue = [];   // { at, ev } scheduled remote events (at = the event's server time st)
@@ -1617,7 +1622,7 @@ function decodeState(m) {
 function resetNet() {
   snapBuf.length = 0;
   netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
-  simAcc = 0; lastSentInp = null; lastSentAt = 0;
+  simAcc = 0; lastSentInp = null; lastSentAt = 0; lastInpAt = 0;
   interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
   evQueue.length = 0;
   netStats.snaps = 0; netStats.gaps.length = 0; netStats.corr = 0; netStats.lastStateNow = 0;
@@ -1654,8 +1659,11 @@ function sendMPInput(input) {
   if (!mpHost) return;
   const now = performance.now();
   const l = lastSentInp;
-  if (!l || input.mx !== l.mx || input.mz !== l.mz || input.fire !== l.fire ||
-      input.jump || input.dive || now - lastSentAt >= 100) {
+  const changed = !l || input.mx !== l.mx || input.mz !== l.mz || input.fire !== l.fire;
+  if (changed || input.jump || input.dive || now - lastSentAt >= 100) {
+    // re-arm the confirmation window only for real new inputs; the 100 ms
+    // keep-alive resend carries no new information for the server
+    if (changed || input.jump || input.dive) lastInpAt = sim.t;
     mpHost.postMessage({ type: 'mp_input', input }, '*');
     lastSentInp = { mx: input.mx, mz: input.mz, fire: input.fire };
     lastSentAt = now;
@@ -1789,15 +1797,31 @@ function applyNet(dt) {
     }
   }
   // me: smooth correction toward the (velocity-extrapolated) server position.
-  // Keep extrapolating as the sample goes stale but weight the pull down
-  // (exp(-age/0.3)) so we don't fight the server with old data; instant snap
-  // only for true discontinuities (fall/respawn, phase change, |err| > 8u).
+  // Four layers keep it from ever feeling like a tug against your own motion:
+  //  - input-confirmation window: until the server has had uplink time to see
+  //    our latest input, no sample can contain it — correcting toward such a
+  //    sample pulls the local prediction backward (the "sticky jump" tug on
+  //    takeoff), so the drift correction is held off;
+  //  - airborne arc ownership: in the air the pull is ×0.2 (vy untouched) —
+  //    the local sim is the solo player here, and the server's copy of the
+  //    flight arrives a tick late; the offset closes on landing;
+  //  - ballistic target: while the sample is airborne, gravity curves the
+  //    extrapolation, so a straight y + vy·age drags the apex by ½g·age²;
+  //  - on the ground the full correction runs (linear extrapolation is ~exact
+  //    there, which is what absorbs the landing offset and any bonk/fall drift).
+  // Weight decays exp(-age/0.3) as the sample goes stale; instant snap only
+  // for true discontinuities (fall/respawn, phase change, |err| > 8u) — those
+  // are events, not drift, and the confirmation window never covers them.
   if (netMine) {
     const p = S.players[me];
     if (!p) return remotes;
     const age = Math.max(0, S.t - netMine.t);
-    const w = Math.exp(-age / 0.3);
-    const tx = netMine.x + netMine.vx * age, ty = netMine.y + netMine.vy * age, tz = netMine.z + netMine.vz * age;
+    const uplink = clamp(netStats.rtt >= 0 ? netStats.rtt / 2000 : 1 / 30, 1 / 30, 0.6);
+    const wInp = clamp((S.t - lastInpAt - uplink) / 0.1, 0, 1);  // 100 ms ramp: no weight pop on re-entry
+    const w = Math.exp(-age / 0.3) * wInp;
+    const tx = netMine.x + netMine.vx * age;
+    const ty = netMine.y + netMine.vy * age - (netMine.ground < 0 ? 0.5 * Sim.K.GRAV * age * age : 0);
+    const tz = netMine.z + netMine.vz * age;
     const ex = tx - p.x, ey = ty - p.y, ez = tz - p.z;
     netStats.corr = Math.hypot(ex, ey, ez);
     if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 64) {  // fall/respawn, phase change, or |err| > 8u
@@ -1806,15 +1830,21 @@ function applyNet(dt) {
       p.ground = netMine.ground >= 0 ? S.solids[netMine.ground] : null;
       needHardSnapMe = false; netStats.snaps++;
     } else {
-      const f = (1 - Math.exp(-10 * dt)) * w;
+      // In the air the local sim owns the arc: the server's version of it is
+      // (uplink + tick) late, and pulling the flight onto it reads as a muted,
+      // slightly delayed jump. A small residual keeps the arc from wandering;
+      // on landing the full grounded correction closes the ~0.2 u offset in
+      // ~0.2 s — far under the 8 u snap guard, so it reads as nothing.
+      const airW = p.ground ? 1 : 0.2;
+      const f = (1 - Math.exp(-10 * dt)) * w * airW;
       p.x += ex * f; p.y += ey * f; p.z += ez * f;
       p.yaw += wrapA(netMine.yaw - p.yaw) * f;
       // ease velocity toward the server's too, so the position correction isn't
       // immediately undone by a stale local velocity (and there's no velocity pop)
-      const fv = (1 - Math.exp(-6 * dt)) * w;
+      const fv = (1 - Math.exp(-6 * dt)) * w * airW;
       p.vx += (netMine.vx - p.vx) * fv;
-      p.vy += (netMine.vy - p.vy) * fv;
       p.vz += (netMine.vz - p.vz) * fv;
+      if (p.ground) p.vy += (netMine.vy - p.vy) * fv;  // in the air, gravity owns vy
     }
   }
   return remotes;

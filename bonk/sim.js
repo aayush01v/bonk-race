@@ -537,6 +537,6 @@ function create(seed) {
   return S;
 }
 
-return { create, K: { PR, PH, RUN, KILL_Y, MAX_AMMO } };
+return { create, K: { PR, PH, RUN, KILL_Y, MAX_AMMO, GRAV, JUMP_V } };
 })();
 if (typeof module !== 'undefined') module.exports = Sim;

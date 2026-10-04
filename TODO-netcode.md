@@ -11,8 +11,21 @@ latency. Bandwidth is **not** the issue (~15–30 KB/s down); latency/jitter/los
 
 Phases 1–3 implemented and covered by automated tests. All suites pass:
 `test_mp_client_sim.js`, `test_mp_e2e.js`, `test_mp_latency.js` (4 line
-scenarios), `test_mp_init.js`, `npm test` (physics). Remaining: manual
-playtest matrix (4.2) and the optional revert flag (4.3).
+scenarios), `test_mp_init.js`, `npm test` (physics).
+
+**Playtest round 1** surfaced "sticky" jumps + slight drag while moving in MP
+mid-race (solo unaffected) even though all aggregate metrics were green. Root
+cause: the own-player correction pulled the airborne player toward server
+samples that predated the latest input, extrapolated the ballistic arc with a
+straight line, and eased `vy` toward stale samples. Fixed with the
+four-layer own-player correction (input-confirmation gate, airborne arc
+ownership ×0.2 + `vy` protection, ballistic target `y + vy·t − ½gt²`,
+grounded-only velocity ease) and a new solo-arc regression test in
+`test_mp_client_sim.js` (3-tick delivery so sample age is realistic; solo
+reference sim; arc Δy < 0.2 u, takeoff Δvy < 2 u/s, landing ±2 ticks — with
+the fix: 0.07 u / 0.45 u/s; reverted: 0.56 u / 4.6 u/s). See README §10.
+
+Remaining: manual playtest matrix (4.2) and the optional revert flag (4.3).
 
 ## Phase 1: Client smoothing fixes (highest impact, low risk, client-only)
 

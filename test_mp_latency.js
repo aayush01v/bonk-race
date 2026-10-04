@@ -114,11 +114,11 @@ function runScenario(name, o) {
   cl.begin();
   cl.players[ME].ammo = 3;
 
-  const factory = new Function('TAU', 'clamp', 'sim', 'me', 'mpHost', 'performance',
+  const factory = new Function('TAU', 'Sim', 'clamp', 'sim', 'me', 'mpHost', 'performance',
     netBlock + '\n' + onStateSrc +
     '\nreturn { applyNet, lerpPair, onState, resetAll, netStats, snapBuf, decodeState, ' +
     'get interpDelay() { return interpDelay; }, get interpTarget() { return interpTarget; } };');
-  const api = factory(Math.PI * 2, clamp, cl, ME, null, perfMock);
+  const api = factory(Math.PI * 2, Sim, clamp, cl, ME, null, perfMock);
   api.resetAll();
 
   // server history (for interpolated references + teleport detection)
