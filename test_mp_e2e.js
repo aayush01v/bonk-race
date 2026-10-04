@@ -35,7 +35,7 @@ function decodeState(m) {
 function makeClient(name) {
   const c = {
     ws: null, name, welcome: null, joined: null, raceStart: null, raceEnd: null,
-    states: [], stateBytes: 0, lobbies: [], events: 0,
+    states: [], stateBytes: 0, lobbies: [], events: 0, evMsgs: [],
   };
   c.ws = new WebSocket(URL);
   c.ws.on('open', () => c.ws.send(JSON.stringify({ type: 'setName', name, kind: 'zombie' })));
@@ -47,7 +47,7 @@ function makeClient(name) {
       case 'lobby': c.lobbies.push(m); break;
       case 'raceStart': c.raceStart = m; break;
       case 'state': c.stateBytes += raw.length; c.states.push(decodeState(m)); break;
-      case 'events': c.events++; break;
+      case 'events': c.events++; c.evMsgs.push(m); break;
       case 'raceEnd': c.raceEnd = m; break;
     }
   });
@@ -127,14 +127,14 @@ async function main() {
 
   await sleep(250); // let the in-flight state packets drain to both clients
 
-  // state spacing: the server broadcasts every 2nd tick, so consecutive packets are
-  // always exactly 2 sim ticks apart (0.0667 s, quantized to 3 decimals) — no more
-  // 33/50/67 ms cadence from two independent timers
+  // state spacing: the server broadcasts every tick (30 Hz) and the deadline-based
+  // ticker keeps consecutive packets exactly 1 sim tick apart in sim time
+  // (0.0333 s, quantized to the ms) — no cadence drift even when the event loop stalls
   const gaps = [];
   for (let i = 1; i < hs.length; i++) gaps.push(hs[i].t - hs[i - 1].t);
-  const inBand = gaps.filter(g => g > 0.05 && g < 0.085).length;
+  const inBand = gaps.filter(g => g > 0.025 && g < 0.055).length;
   ok(gaps.length > 10 && inBand / gaps.length >= 0.98,
-    `state packets tick-aligned (${gaps.length} gaps, ${Math.round(100 * inBand / Math.max(1, gaps.length))}% within 0.05-0.085 s, avg ${gaps.length ? (gaps.reduce((a, b) => a + b, 0) / gaps.length * 1000).toFixed(1) : '0'} ms)`);
+    `state packets tick-aligned at 30 Hz (${gaps.length} gaps, ${Math.round(100 * inBand / Math.max(1, gaps.length))}% within 0.025-0.055 s, avg ${gaps.length ? (gaps.reduce((a, b) => a + b, 0) / gaps.length * 1000).toFixed(1) : '0'} ms)`);
 
   // P2 compact payload: 4 players + crumble tiles + a few bullets should stay
   // far below the old per-field-object format (~1.9 KB)
@@ -171,6 +171,12 @@ async function main() {
   // discrete events now relayed (go + scripted jumps + any bonks/falls)
   ok(host.events >= 1, `host received relayed events (${host.events})`);
   ok(guest.events >= 1, `guest received relayed events (${guest.events})`);
+  // events carry the sim sample time (st) so clients can time-align the effects
+  const stamped = m => m.events.every(e => typeof e.st === 'number' && isFinite(e.st) && e.st > 0);
+  ok(host.evMsgs.length >= 1 && host.evMsgs.every(stamped),
+    `all relayed events stamped with sample time st (host ${host.evMsgs.length} packets)`);
+  ok(guest.evMsgs.length >= 1 && guest.evMsgs.every(stamped),
+    `all relayed events stamped with sample time st (guest ${guest.evMsgs.length} packets)`);
 
   // no server-side crash
   ok(!/TypeError|ReferenceError|Cannot read/i.test(srvOut.split('race started').pop() || ''),

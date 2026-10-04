@@ -16,7 +16,7 @@ There are now **two playable clients** built from one shared `game.js`: a **Baby
 | **Babylon.js client**, `client/dist/sim-race-babylon.html` | **Built. Tested only against my own stand-in for Babylon, never against the real library** (section 8) |
 | **WebGL1 client**, `client/dist/sim-race-webgl.html` (your reference game on the current `sim.js`) | **Built and tested in headless Chromium** |
 | Multiplayer (rooms, lobby, authoritative server) | **Done — `mp-server.js` + `lobby.html`, MP mode in the WebGL client** (section 10) |
-| MP smoothness (latency / choppiness) | **Fixed and verified** — P0/P1/P2 landed and tested: `test_mp_client_sim.js` runs the shipped client netcode unmodified against a real 30 Hz server sim; `test_mp_e2e.js` drives the real server (section 10 is the record) |
+| MP smoothness (latency / choppiness) | **Fixed and verified, incl. slow lines** — P0/P1/P2 + slow-line hardening (adaptive delay, capped extrapolation, 30 Hz deadline-aligned server, section 10): `test_mp_client_sim.js` runs the shipped client netcode unmodified against a real 30 Hz server sim; `test_mp_latency.js` runs it through 4 lossy-line scenarios; `test_mp_e2e.js` drives the real server |
 
 Both clients share one `game.js` (input, HUD, audio, menu, results) taken unchanged from your reference project; only the renderer differs. **The honest gap: nobody has seen the Babylon build render with the real Babylon.js**, because my sandbox could not download it. Open it in a browser first (section 8).
 
@@ -46,9 +46,11 @@ Multiplayer smoothness is **done and tested** (section 10): `node test_mp_client
   sim-race-webgl.html       WebGL client — solo, and MP iframe mode (?mp=1) driven by the lobby
   sim-race-babylon.html     Babylon client (solo only, no MP mode)
   index.html                solo game page
-  test_mp_e2e.js            end-to-end MP test (real server + two WS clients: create/join/start/input/state, tick alignment, client agreement, payload size)
+  test_mp_e2e.js            end-to-end MP test (real server + two WS clients: create/join/start/input/state, tick alignment, client agreement, payload size, event st stamps)
   test_mp_init.js           replays the client mp_init flow incl. bots
   test_mp_client_sim.js     runs the shipped client netcode (extracted verbatim from sim-race-webgl.html) against a real 30 Hz authoritative sim
+  test_mp_latency.js        runs the shipped client netcode through 4 lossy-line scenarios (slow/baseline/extreme/1 s outage) and asserts delay, smoothness, pacing, countdown
+  TODO-netcode.md           the netcode to-do list with current status + the design decisions from testing
   server.js, server.py      solo static servers
   bonk/
     README.md               earlier handoff copy of this document
@@ -258,26 +260,30 @@ This replaces the old Three.js character-viewer concept. It is a **playable sing
 
 ## 10. Multiplayer netcode — current state, diagnosis record, verification
 
-Multiplayer is **built and smooth**: rooms, lobby, authoritative 30 Hz server, tick-aligned compact 15 Hz snapshots, 100 ms interpolation for remotes, smooth own-player correction, change-detection input. **All P0/P1/P2 fixes have landed and are verified** by `test_mp_client_sim.js` and `test_mp_e2e.js` (10.6). The diagnosis below (10.1–10.5) is kept as the record of what was wrong and why each fix is shaped the way it is. Re-verify line numbers before editing — they move.
+Multiplayer is **built and smooth, on slow lines too**: rooms, lobby, deadline-based authoritative 30 Hz server, tick-aligned compact 30 Hz snapshots, adaptive interpolation delay with capped starvation extrapolation, smooth own-player correction, change-detection input, time-aligned remote effects. **All P0/P1/P2 fixes and the slow-line hardening (Phase 1–3, `TODO-netcode.md`) have landed and are verified** by `test_mp_client_sim.js`, `test_mp_e2e.js` and the 4-scenario `test_mp_latency.js` (10.6). The diagnosis below (10.1–10.5) is kept as the record of what was wrong and why each fix is shaped the way it is. Re-verify line numbers before editing — they move.
 
 ### 10.1 Architecture (current)
 
 ```
 your keys ─(mp_input, on change + 100 ms keepalive)─▶ postMessage ─▶ lobby.html ─▶ WebSocket ─▶ mp-server.js
                                                                               │ authoritative sim, 30 ticks/s
-      game iframe ◀─postMessage─ lobby.html ◀── WebSocket ── compact state broadcast, 15 Hz (every 2nd tick, tick-aligned)
+      game iframe ◀─postMessage─ lobby.html ◀── WebSocket ── compact state broadcast, 30 Hz (every tick, deadline-aligned)
 ```
 
-- **`mp-server.js`** — Node + ws. One authoritative `bonk/sim.js` per room (`humanId = -1`; humans driven through `p._mpInput`). One `setInterval` for the 30 Hz sim tick; state is broadcast **from inside `tick()`** every 2nd tick (`mp-server.js:309`), so consecutive packets are always exactly two sim ticks (66.7 ms) apart and carry a fresh post-tick state. Payload is the compact fixed-point format documented above `broadcastState` (`mp-server.js:312-327`). Also: rooms, host settings, bots, kick, host transfer, results, rematch, and a 1 Hz `ping`/`pong` RTT probe (`mp-server.js:526`).
+- **`mp-server.js`** — Node + ws. One authoritative `bonk/sim.js` per room (`humanId = -1`; humans driven through `p._mpInput`). The 30 Hz tick runs on a **deadline-based ticker** (`startTicker`, `mp-server.js:258-278`): a wall-clock `nextTickAt` deadline, every due tick runs on fire (bounded to 3 catch-up sub-steps, then resync so a long GC pause can't spiral), and rescheduling is from the deadline — so consecutive packets are **exactly 1/30 s apart in sim time even when the event loop jitters** (plain `setInterval` drifts and judders the cadence). State is broadcast **from inside `tick()`** every tick (`STATE_EVERY = 1`, `mp-server.js:336`): 30 Hz, fresh post-tick state, ~1 KB payload ≈ 25 KB/s down per client — bandwidth was never the constraint, latency/jitter/loss was. The compact fixed-point wire format is documented above `broadcastState` (`mp-server.js:355`). Relayed events carry `st = sim.t`, the sim time they were produced (`mp-server.js:314`), so clients can time-align effects (10.1 client). Also: rooms, host settings, bots, kick, host transfer, results, rematch, and a 1 Hz `ping`/`pong` RTT probe.
 - **`lobby.html`** — the WS client and room UI. Pure relay: server `state`/`events`/`pong` → `postMessage` to the game iframe (one message per packet); iframe `mp_input`/`mp_ping` → WS, forwarded verbatim.
-- **`sim-race-webgl.html?mp=1`** — the game in the iframe. Runs a full local sim (same seed + roster as the server) on **fixed `1/60` sub-steps** (rAF time accumulated) so its sub-step size matches the server's `h`. The netcode block is `sim-race-webgl.html:1577-1723`:
+- **`sim-race-webgl.html?mp=1`** — the game in the iframe. Runs a full local sim (same seed + roster as the server) on **fixed `1/60` sub-steps** (rAF time accumulated, cap 10/frame) so its sub-step size matches the server's `h`. The netcode block is `sim-race-webgl.html:1577-1800`:
   - `decodeState()` inverts the compact wire format.
-  - A ring of the last 10 snapshots (`snapBuf`); **remotes (other humans AND bots) are rendered 100 ms behind the local clock**, lerped between the two bracketing samples (`lerpPair`). Their pos/vel/yaw are written into the local sim before each step and re-applied after it, so local physics never owns their motion (it only resolves their collisions) — no more 15–20 Hz pulse. Discontinuities > 8 u (fall/respawn) snap to the newer sample instead of lerping across the map.
-  - **Own player:** local prediction (your input applied the same frame) with a decaying correction toward the velocity-extrapolated server position (`f = 1 − exp(−10·dt)`); instant hard snap only on true discontinuities (fall/respawn, phase change, |err| > 4 u).
-  - **Bullets:** your live bullets stay local; remotes are rebuilt by `id` between the two bracketing samples each frame (new bullets backdated to render time, held out until they clear the muzzle).
-  - **Crumble tiles:** the falling `cy` is interpolated like player positions.
+  - **Adaptive interpolation delay** (`updateDelayTarget`, `:1630`): the render delay eases (τ ≈ 1 s, no pops) toward `clamp(0.15 + rtt/2 + jitter×0.5, 0.1, 0.4)` — one-way latency from the 1 Hz RTT probe plus the p95−mean of the ~60-sample arrival-gap window. A good line runs ~0.15–0.25 s of delay; a 300 ms one-way line grows to the 0.4 s cap. Replaces the old fixed 100 ms, which froze-jumped at any real internet latency.
+  - **Snapshot buffer** (`snapBuf`): time-based cap — snapshots older than `now − 1 s` (`BUF_AGE`) are dropped instead of a fixed packet count, so extra buffer converts into headroom for the adaptive delay.
+  - **Remotes (other humans AND bots)** are rendered `interpDelay` behind the local clock, lerped between the two bracketing samples (`lerpPair`, `:1668`). Their pos/vel/yaw are written into the local sim before each step and re-applied after it, so local physics never owns their motion (it only resolves their collisions) — no pulse at any rate. Sample discontinuities > 8 u (fall/respawn) snap to the newer sample. **When starved** (render time has overtaken the newest sample, e.g. a loss burst) the newest sample is advanced at its own velocity + yaw rate, capped at `EXTRAP_MAX = 0.2` s, instead of freezing. **Catch-up ease** (`:1733`): after a long starvation the buffer may have been trimmed, so the bracketing samples look continuous even though the displayed position (held at the extrapolation cap) is far behind — the sample-discontinuity guard can't see that; targets > 8 u away are then closed over ~150 ms instead of teleporting (a remote that fell and respawned while your connection was down).
+  - **Own player:** local prediction (your input applied the same frame) with a decaying correction toward the velocity-extrapolated server position: the pull weight decays `exp(−age/0.3)` as the sample goes stale (never fights the server with old data), position ease `1 − exp(−10·dt)` and a separate slower velocity ease `1 − exp(−6·dt)` (no velocity pop after a position correction). Instant hard snap only on true discontinuities (fall/respawn, phase change, death toggle, |err| > 8 u).
+  - **Soft clock alignment** (`:1689`, `:2139`): each arrival records a smoothed `srvOffset = server time − wall time`; `sim.t` eases toward `srvOffset + now` (τ ≈ 100 ms, only when |err| > 50 ms) instead of hard-snapping the whole scene when a frame lands late.
+  - **Remote effects are time-aligned** (`flushNetEvents`, `:1646`): relayed fire/jump/dive events queue in `evQueue` keyed on their `st` sample time and are released when the render time reaches `st` — so the VFX lands when the remote's interpolated position actually reaches that spot; anything > 250 ms stale is dropped instead of bursting.
+  - **Bullets:** your live bullets stay local; remotes are rebuilt by `id` between the two bracketing samples each frame (new bullets backdated to render time, held out until they clear the muzzle; starved, they keep flying at their sample velocity).
+  - **Crumble tiles:** the falling `cy` is interpolated like player positions; when starved, a falling tile keeps dropping at its recent fall rate.
   - `sendMPInput()` posts input only on change (+ one-shot pulses + 100 ms keepalive) — not every frame.
-  - `?net=1` shows a live overlay: RTT, packet-arrival gap p95, hard-snap count, current correction magnitude, interpolation delay.
+  - `?net=1` shows a live overlay: RTT, packet-arrival gap p95, hard-snap count, current correction magnitude, and the live interpolation delay with its adaptive target.
 - **`sim-race-babylon.html`** — solo only; no MP mode.
 
 ### 10.2 What already works
@@ -285,7 +291,7 @@ your keys ─(mp_input, on change + 100 ms keepalive)─▶ postMessage ─▶ l
 - Server-authoritative rooms, roster/order, bots, host settings (spinner speed, crumble hold, bounce force, gravity), kick, host transfer, results, rematch.
 - **Your own input feels fine**: the local sim applies it the same frame (~1-frame latency); the correction is now the smooth decaying one (P0-C), not the old hard snap.
 - Discrete events (bonk/fall/finish/fire/…) relayed by the server so effects play on other clients; the client filters to remote humans only.
-- Tests: `test_mp_client_sim.js` (the shipped netcode, extracted verbatim from the HTML, run 15 s against a real 30 Hz server sim with 1-tick input + delivery latency), `test_mp_e2e.js` (real server, two WS clients through create/join/start/input/state, tick alignment, client agreement, payload size) and `test_mp_init.js` (the client `mp_init` flow incl. bots). All green.
+- Tests: `test_mp_client_sim.js` (the shipped netcode, extracted verbatim from the HTML, run 15 s against a real 30 Hz server sim with 1-tick input + delivery latency), `test_mp_e2e.js` (real server, two WS clients through create/join/start/input/state, tick alignment, client agreement, payload size, event `st` stamps), `test_mp_latency.js` (the shipped netcode behind a lossy delivery pipe: 4 line scenarios — slow line, low-latency baseline, extreme line, and a 1 s delivery outage — asserting delay convergence/shrink, frame-to-frame smoothness, bounded own-player error, pacing and countdown stepping) and `test_mp_init.js` (the client `mp_init` flow incl. bots). All green.
 
 ### 10.3 Latency budget, as it stands (LAN)
 
@@ -294,11 +300,11 @@ your keys ─(mp_input, on change + 100 ms keepalive)─▶ postMessage ─▶ l
 | key → local sim (your own motion) | 1 frame (~16 ms) — fine |
 | key → lobby → server | ~2–5 ms + JSON overhead; input is sent only on change, so usually one small packet |
 | server: wait for next tick | 0–33 ms (avg 17) |
-| server: wait for next state broadcast | 0–33 ms (broadcast is tick-aligned, so always a whole tick; no independent timer drift) |
-| **your action visible to other players** | ~50–90 ms + RTT/2 — arriving as uniform 66.7 ms samples that the clients interpolate, so it reads as one smooth 100 ms-delayed stream, not 20 Hz steps |
+| server: wait for next state broadcast | **0** — the broadcast runs inside the tick (deadline-aligned), so every post-tick state goes out at 30 Hz; sim-time spacing between packets is exactly 33.3 ms even under event-loop stalls |
+| **your action visible to other players** | ~35–70 ms + RTT/2 — arriving as uniform 33.3 ms samples that the clients interpolate, so it reads as one smooth stream delayed by `interpDelay`, not 20 Hz steps |
 | their action visible to you | same, minus the snap artifact — remotes **are** the interpolation |
 
-The iframe/postMessage hop is sub-millisecond and is **not** a problem. The remaining fixed cost is the deliberate 100 ms interpolation delay (`INTERP_DELAY`); drop it to 0.08 s if a LAN feel ever needs it.
+The iframe/postMessage hop is sub-millisecond and is **not** a problem. The remaining deliberate cost is the interpolation delay, which is now **adaptive**: on a clean LAN line it settles around the 0.15 s base (plus a little latency/jitter margin), and on a bad line it grows with `rtt/2 + 0.5×jitter` up to the 0.4 s cap — exactly the headroom that prevents starvation freezes. If a LAN feel ever needs less, lower `INTERP_BASE` (0.15) and `INTERP_MIN` (0.1) together.
 
 ### 10.4 Root causes of the choppiness (pre-fix state, by impact)
 
@@ -315,24 +321,33 @@ All eight are fixed (10.5); line numbers below point at the old code.
 
 ### 10.5 Fix plan (all landed)
 
-**P0-A · Server: one timer, broadcast aligned to ticks — DONE** as written; the input `console.log` went with it. `test_mp_e2e.js` asserts the resulting cadence (100% of gaps within 0.05–0.085 s, avg 66.7 ms).
+**P0-A · Server: one timer, broadcast aligned to ticks — DONE** as written; the input `console.log` went with it. Phase 2 upgraded the timer to the deadline-based ticker and the broadcast to every tick, so `test_mp_e2e.js` now asserts the 30 Hz cadence (100% of gaps within 0.025–0.055 s, avg 33.3 ms).
 
-**P0-B · Client: interpolation buffer for everything remote — DONE.** Ring is 10 snapshots; delay 100 ms. One addition the plan didn't name: the local `step`'s neutral-input physics bleeds the remotes' velocity, so the interpolated values are re-applied **after** the step too — what renders is the interpolation itself. Discontinuities > 8 u snap instead of lerp. This fixed 1, 4 (with the id-keyed bullet rebuild), 6 and 7, and makes 2 invisible.
+**P0-B · Client: interpolation buffer for everything remote — DONE.** (Phase 2 later replaced the 10-packet ring with a time-based 1 s cap and the fixed 100 ms delay with the adaptive one — see Phase 1–3 below.) One addition the plan didn't name: the local `step`'s neutral-input physics bleeds the remotes' velocity, so the interpolated values are re-applied **after** the step too — what renders is the interpolation itself. Discontinuities > 8 u snap instead of lerp. This fixed 1, 4 (with the id-keyed bullet rebuild), 6 and 7, and makes 2 invisible.
 
-**P0-C · Client: smooth own-player correction — DONE** as written, plus the server sample is velocity-extrapolated by its age before the correction, so the target stays on the moving player's line and the correction magnitude stays small (test p95 0.36 u over 15 s).
+**P0-C · Client: smooth own-player correction — DONE** as written, plus the server sample is velocity-extrapolated by its age before the correction, so the target stays on the moving player's line and the correction magnitude stays small (test p95 0.36 u over 15 s). Phase 1 later removed the 0.2 s age cap (weight decays `exp(−age/0.3)` instead), raised the hard-snap threshold to 8 u, and added the velocity ease.
 
-**P1 · Client: fixed-timestep local sim — DONE** as written; backlog past 5 sub-steps is dropped instead of spiralling.
+**P1 · Client: fixed-timestep local sim — DONE** as written; backlog past 10 sub-steps (raised from 5 in Phase 1 so a 20–30 FPS frame keeps up) is dropped instead of spiralling.
 
 **P1 · Input: send on change — DONE** as written (`sendMPInput`, 100 ms keepalive).
 
-**P2 · Compact payloads — DONE.** State packets are now keyless positional arrays in fixed-point (positions ×100, velocities ×10, sim time in ms; player index = player id, no `id` field; documented above `broadcastState` in `mp-server.js`, reversed by `decodeState()` in `sim-race-webgl.html`). This is far smaller than the old per-field objects (e2e measures the average: 4 players + crumble tiles ≈ 370 bytes vs ~1.9 KB) and removes every `toFixed` from the 15 Hz hot path — `Math.round` integers instead of per-field string allocation. Event packets also quantize their x/y/z to 2 decimals on the wire (clients only use them to place effects). `test_mp_e2e.js` has a size regression guard. `perMessageDeflate` still considered only if measured to help — it trades CPU for bytes.
+**P2 · Compact payloads — DONE.** State packets are now keyless positional arrays in fixed-point (positions ×100, velocities ×10, sim time in ms; player index = player id, no `id` field; documented above `broadcastState` in `mp-server.js`, reversed by `decodeState()` in `sim-race-webgl.html`). This is far smaller than the old per-field objects (e2e measures the average: 4 players + crumble tiles ≈ 370 bytes vs ~1.9 KB) and removes every `toFixed` from the hot path — `Math.round` integers instead of per-field string allocation. Event packets also quantize their x/y/z to 2 decimals on the wire (clients only use them to place effects). `test_mp_e2e.js` has a size regression guard. `perMessageDeflate` still considered only if measured to help — it trades CPU for bytes.
+
+**Phase 1–3 · Slow-line hardening (2026-10, `TODO-netcode.md`) — DONE.** The P0–P2 work made LAN smooth, but a fixed 100 ms delay + 15 Hz stream + no starvation handling still freeze-jumps at realistic internet latency (bandwidth was never the issue — ~15–30 KB/s down; latency/jitter/loss is).
+
+- **Client smoothing (client-only, shipped first):** adaptive interpolation delay (0.15 s base + rtt/2 + 0.5×jitter, eased, clamped 0.1–0.4 s) instead of fixed 100 ms; capped starvation extrapolation (advance the newest sample at its own velocity, ≤ 0.2 s, instead of freezing); time-based buffer cap (keep 1 s of history, not 10 packets); own-player correction with decaying stale-sample weight, 8 u hard-snap threshold, and velocity easing; soft `sim.t` alignment instead of hard clock snap; sub-step cap 5 → 10.
+- **Server pacing:** deadline-based 30 Hz ticker (uniform sim-time packet spacing even under event-loop stalls, 3 catch-up sub-steps then resync) and 30 Hz state broadcast (`STATE_EVERY = 1`; payload ~1 KB, ≈ 25 KB/s down per client — halved the starvation gaps and the bot/remote motion stepping).
+- **Event time-alignment:** every relayed event carries `st = sim.t`; the client queues remote fire/jump/dive VFX until the interpolated remote actually reaches the event's spot (drops > 250 ms stale), so effects land on the render clock instead of on packet arrival.
+- **Catch-up ease (added while verifying, `test_mp_latency.js` S4):** after a long outage the trimmed buffer makes the new sample pair look continuous, so a big server-side gap (remote fell and respawned while offline) bypassed the snap guard as one 28 u frame teleport; targets > 8 u from the displayed position now close over ~150 ms.
+
+**Considered, not doing:**
 
 **Considered, not doing:**
 
 - **Delta/diffed snapshots** — worthwhile at 32+ players; at ≤8 players full 15–30 Hz state is smaller in practice and far simpler. Revisit if rooms grow.
 - **Binary payloads (Float32Array + binary WS frames)** — ~2× smaller and no parse cost, but only worth it once P2 shows JSON is actually a hotspot.
 - **Server lag compensation (rewind to input timestamp)** — for frame-perfect hit resolution; this game's knockback physics is forgiving and 15–30 Hz authoritative state suffices.
-- **Extrapolation of remote players** instead of interpolation — amplifies jitter and packet loss; interpolation is the standard for this game class.
+- **Unbounded extrapolation of remote players** instead of interpolation — amplifies jitter and packet loss; interpolation is the standard for this game class. (The capped 0.2 s starvation extrapolation in Phase 1 is the deliberate middle ground: it bounds the wrong direction of error, and the catch-up ease absorbs any gap it leaves.)
 - **Colyseus** (originally planned, section 4) — it's the same netcode model (tick + snapshot + client-side interpolation); the hand-rolled server is working, no reason to switch now.
 - **WebRTC datachannel / P2P** — only if hosting cross-region with high RTT demands lower remote-player latency than the interpolation budget tolerates.
 
@@ -345,7 +360,12 @@ All eight are fixed (10.5); line numbers below point at the old code.
   - a just-fired own bullet survives the per-frame rebuild while the server hasn't seen it;
   - the snapshot ring stays bounded.
   (Test gotchas learned the hard way: the server copy of your own player needs ammo — the client's is synced down from it; bullets die fast on the spinner bars, so a few shots yield too few samples; and a fall→respawn teleport makes a linear reference meaningless, so those intervals are skipped.)
-- **`node test_mp_e2e.js`** — real server, two WS clients: tick-aligned state (100% of gaps 0.05–0.085 s, avg 66.7 ms), compact payloads (avg ~367 B vs ~1.9 KB old), both clients agree on every player position to < 0.011 u at the same server time, all four racers advance, events relayed, no server errors.
-- **`?net=1` overlay** — RTT (1 Hz ping relayed through the lobby), packet-arrival gap p95, hard-snap count, live correction magnitude, interpolation delay. How to prove it is actually smoother, not just different.
-- **Two-window playtest (recommended, not run in the sandbox):** open the lobby in two browsers against the same server: remote players should move at 60 fps with no pulse, own player never pops except on respawn, crumble tiles fall in sync, bullets travel smoothly.
+- **`node test_mp_e2e.js`** — real server, two WS clients: 30 Hz tick-aligned state (100% of gaps 0.025–0.055 s, avg 33.3 ms), compact payloads (avg ~366 B vs ~1.9 KB old), both clients agree on every player position to < 0.011 u at the same server time, all four racers advance, events relayed **and stamped with `st` sample time**, no server errors.
+- **`node test_mp_latency.js`** — the shipped netcode extracted verbatim and driven through a configurable lossy pipe (one-way delay + jitter + drop, deterministic RNG) against a real 30 Hz server sim; RTT probe simulated. Four scenarios, all pass:
+  - **S1 slow line** (167 ms one-way, ±2 tick jitter, 5% drop): delay grows to 0.38 s to cover the line, p99 remote frame jump 0.40 u, **zero** starvation freezes, own-player p95 0.21 u, stream stays paced (33 ms median gap), and the countdown advances in tick-sized steps (p95 40 ms) under load.
+  - **S2 low-latency baseline** (33 ms, no loss): delay shrinks back to 0.22 s — a permanently high delay on a good line is a bug too.
+  - **S3 extreme line** (400 ms one-way, ±4 tick jitter, 10% drop): delay saturates at the 0.4 s cap; p99 frame jump 0.39 u, own-player p95 0.21 u — the capped extrapolation keeps motion bounded instead of freezing-and-jumping.
+  - **S4 one-second delivery outage**: remote freezes at the extrapolation cap while the pipe is down (no runaway), the resume catch-up is eased over ~150 ms (max 9.2 u step — a 28 u teleport before the catch-up ease), own prediction stays under the 8 u snap guard even with a local-only fall/respawn on stale crumble state, and the correction converges (last-3 s p95 0.08 u).
+- **`?net=1` overlay** — RTT (1 Hz ping relayed through the lobby), packet-arrival gap p95, hard-snap count, live correction magnitude, live interpolation delay with its adaptive target. How to prove it is actually smoother, not just different.
+- **Two-window playtest (recommended, not run in the sandbox):** open the lobby in two browsers against the same server — plain, and again under Chrome DevTools "Fast 3G"/"Slow 3G" throttling: remote players should move at 60 fps with no pulse at any line quality, own player never pops except on respawn (and at most one eased catch-up after a total connection loss), crumble tiles fall in sync, bullets travel smoothly, and `snaps` on the `?net=1` overlay should stay near 0.
 - **Solo mode untouched:** every P0/P1 change is gated behind `isMP` (`sim-race-webgl.html:1298`) or is server-side, so `index.html` and the Babylon client are unchanged.

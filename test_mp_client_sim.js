@@ -28,7 +28,8 @@ if (start < 0 || end < 0 || end <= start) {
 }
 const netBlock = html.slice(start, end);
 
-// the mp_state arrival handler, verbatim (minus the DOM event plumbing).
+// the mp_state arrival handler, verbatim from the window 'message' branch in
+// sim-race-webgl.html (minus the DOM event plumbing).
 // decodeState comes from the extracted netcode block, so the test exercises the
 // shipped decoder; snapNow() below emits the compact wire format.
 const onStateSrc = `
@@ -39,8 +40,14 @@ function onState(raw) {
   if (netStats.gaps.length > 60) netStats.gaps.shift();
   netStats.lastStateNow = now;
   snapBuf.push(s);
-  if (snapBuf.length > BUF_CAP) snapBuf.shift();
-  if (Math.abs(sim.t - s.t) > 0.3) { sim.t = s.t; sim.raceT = s.raceT; }
+  // time-based cap: keep enough history for the adaptive delay instead of a
+  // fixed packet count, so extra buffer becomes headroom under latency
+  while (snapBuf.length > 2 && s.t - snapBuf[0].t > BUF_AGE) snapBuf.shift();
+  // soft clock alignment: record the smoothed server/client clock offset;
+  // applyNet() eases sim.t toward it instead of hard-snapping the whole scene
+  const off = s.t - now / 1000;
+  srvOffset = srvOffset === null ? off : srvOffset + (off - srvOffset) * 0.1;
+  updateDelayTarget();
   sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
   if (s.phase !== lastNetPhase) { lastNetPhase = s.phase; needHardSnapMe = true; }
   for (let i = 0; i < s.players.length; i++) {
@@ -64,13 +71,21 @@ function onState(raw) {
 function resetAll() { resetNet(); lastNetPhase = ''; needHardSnapMe = false; netMineDead = false; netMine = null; }
 `;
 
-// eval the shipped block + glue in a scope with the deps the page provides
-const factory = new Function('TAU', 'clamp', 'sim', 'me', 'mpHost',
+// eval the shipped block + glue in a scope with the deps the page provides.
+// performance is a VIRTUAL clock that advances in lockstep with sim time: the
+// shipped soft-clock alignment (applyNet) eases sim.t toward
+// srvOffset + performance.now(), which is only meaningful when wall time and
+// sim time advance together (a real browser). A frozen real clock would make
+// the client clock lag the server and inflate every error measured here.
+const factory = new Function('TAU', 'clamp', 'sim', 'me', 'mpHost', 'performance',
   netBlock + '\n' + onStateSrc +
-  '\nreturn { applyNet, lerpPair, sendMPInput, onState, resetAll, netStats, snapBuf };');
+  '\nreturn { applyNet, lerpPair, sendMPInput, onState, resetAll, netStats, snapBuf, ' +
+  'get interpDelay() { return interpDelay; }, get interpTarget() { return interpTarget; } };');
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const NEUTRAL = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
+let vNowMs = 0;                            // virtual wall clock (ms), 1:1 with sim time
+const perfMock = { now: () => vNowMs };
 
 // ── server (authoritative) ──
 const SEED = 123456789;
@@ -98,7 +113,7 @@ cl.players[2]._mpInput = NEUTRAL;
 cl.begin();
 cl.players[ME].ammo = 3; // for the local-only shot after the countdown (after begin(): reset() would zero it)
 
-const api = factory(Math.PI * 2, clamp, cl, ME, null);
+const api = factory(Math.PI * 2, clamp, cl, ME, null, perfMock);
 api.resetAll();
 
 // server history for interpolation at the client's render time
@@ -142,7 +157,8 @@ function srvPosAt(id, t) { // linear interpolation in the tick history
   };
 }
 
-// run the race: 30 Hz server tick, client frame per tick with 1-tick delivery latency
+// run the race: 30 Hz server tick, state broadcast every tick (shipped
+// STATE_EVERY = 1), client frame per tick with 1-tick delivery latency
 const myInputDelay = []; // my local input, applied to the server one tick late
 let pending = null;
 const remoteErr = [], myErr = [], bulletErr = [];
@@ -151,6 +167,7 @@ let ownBulletAliveWhileServerBlind = false;
 let simAcc = 0;
 
 for (let tick = 1; tick <= N_TICKS; tick++) {
+  vNowMs = tick * TICK * 1000;  // virtual wall clock tracks sim time (1 s sim = 1 s wall)
   // server: apply inputs (mine one tick late — models RTT), tick, maybe broadcast
   const myInp = myInputDelay.length ? myInputDelay.shift() : NEUTRAL;
   srv.players[ME]._mpInput = myInp;
@@ -160,7 +177,7 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   srv.step(TICK, null);
   for (let i = 0; i < 3; i++) hist.p[i].push({ x: srv.players[i].x, y: srv.players[i].y, z: srv.players[i].z, vz: srv.players[i].vz });
   hist.t.push(srv.t);
-  if (tick % 2 === 0) pending = snapNow();
+  pending = snapNow();  // 30 Hz state stream, like the shipped server
 
   // client frame: deliver the snapshot that left on the previous tick
   if (pending) { api.onState(pending); pending = null; }
@@ -178,8 +195,8 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   // the client re-applies the remote interpolation after the local step
   for (const r of remotes) { r.p.x = r.x; r.p.y = r.y; r.p.z = r.z; r.p.vx = r.vx; r.p.vy = r.vy; r.p.vz = r.vz; r.p.yaw = r.yaw; }
 
-  // ── measurements (client render time = cl.t, interpolated target = cl.t - 0.1) ──
-  const tI = cl.t - 0.1;
+  // ── measurements (render time = cl.t - interpDelay, the live adaptive delay) ──
+  const tI = cl.t - api.interpDelay;
   for (const id of [1, 2]) {
     const ref = srvPosAt(id, tI);
     if (ref.gap > 4) continue; // fall→respawn teleport: client snaps, ref is bogus
@@ -218,7 +235,9 @@ ok(vzDecayFrames === 0, `no remote velocity decay: ${vzDecayFrames}/${vzFrames} 
 ok(p95(myErr, 0.95) < 1.0, `own-player correction bounded (p95 ${p95(myErr, 0.95).toFixed(2)} u, mean ${mean(myErr).toFixed(2)} u)`);
 ok(bulletErr.length > 10 && p95(bulletErr, 0.95) < 1.0, `remote bullets rebuilt by id track server (${bulletErr.length} samples, p95 ${bulletErr.length ? p95(bulletErr, 0.95).toFixed(2) : '--'} u)`);
 ok(ownBulletAliveWhileServerBlind, 'own local bullet survives rebuild while server hasn\'t seen it');
-ok(api.snapBuf.length <= 10, 'snapshot ring stays bounded (' + api.snapBuf.length + ')');
+const bufWin = api.snapBuf.length > 1 ? api.snapBuf[api.snapBuf.length - 1].t - api.snapBuf[0].t : 0;
+ok(bufWin > 0.9 && bufWin <= 1.05,
+  `snapshot buffer holds the ~1 s time window (shipped BUF_AGE; ${bufWin.toFixed(2)} s, ${api.snapBuf.length} samples)`);
 
 console.log('\n' + (failures === 0 ? 'CLIENT NETCODE: ALL PASS' : `CLIENT NETCODE: ${failures} FAILURE(S)`));
 process.exit(failures === 0 ? 0 : 1);

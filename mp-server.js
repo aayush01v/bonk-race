@@ -37,7 +37,7 @@ const PORT = parseInt(process.env.PORT || '8000', 10);
 const HOST = '0.0.0.0';
 const ROOT = path.resolve(__dirname);
 const TICK_RATE = 30;            // server sim ticks/sec
-const STATE_EVERY = 2;           // broadcast state every Nth tick (30/2 = 15 Hz, tick-aligned)
+const STATE_EVERY = 1;           // broadcast state every Nth tick (30/1 = 30 Hz; payload ~1-2 KB ≈ 25 KB/s down)
 const MAX_ROOMS  = 50;
 const MAX_PLAYERS_PER_ROOM = 8;
 const ROOM_CODE_LEN = 5;
@@ -77,7 +77,8 @@ class Room {
     this.clients = new Map();     // playerId → client
     this.sim    = null;
     this.seed   = (Math.random() * 1e9) | 0;
-    this.tickIv = null;
+    this.tickIv = null;          // deadline-based ticker handle (see startTicker)
+    this.nextTickAt = 0;         // wall-clock (ms) deadline of the next tick
     this.tickCount = 0;
     this.raceEndTimer = null;
 
@@ -135,7 +136,7 @@ class Room {
   }
 
   destroy() {
-    if (this.tickIv) clearInterval(this.tickIv);
+    if (this.tickIv) clearTimeout(this.tickIv);
     if (this.raceEndTimer) clearTimeout(this.raceEndTimer);
     rooms.delete(this.code);
     console.log(`[Room ${this.code}] destroyed`);
@@ -245,14 +246,35 @@ class Room {
     }
 
     // start ticking — state is broadcast from inside tick() every STATE_EVERY-th
-    // tick, so packets are always exactly N sim ticks apart (client can interpolate)
-    if (this.tickIv) clearInterval(this.tickIv);
+    // tick, so packets are always exactly N sim ticks apart in sim time
+    // (the client can interpolate) even when wall-clock firing jitters
+    if (this.tickIv) clearTimeout(this.tickIv);
     this.tickCount = 0;
-
-    const tickDt = 1 / TICK_RATE;
-    this.tickIv = setInterval(() => this.tick(tickDt), tickDt * 1000);
+    this.startTicker();
 
     console.log(`[Room ${this.code}] race started with ${this.sim.players.length} players (${this.clients.size} human, ${this.settings.botCount} bots)`);
+  }
+
+  /* ── deadline-based ticker ──
+     Plain setInterval drifts under load: the fire times jitter and the snapshot
+     cadence judders even at zero latency. Instead keep a wall-clock deadline:
+     on fire, run every tick that is due (bounded to 3 catch-up sub-steps, then
+     resync so a long GC pause can't spiral), and reschedule from the deadline.
+     Consecutive state packets are always exactly 1/30 s apart in sim time. */
+  startTicker() {
+    const tickMs = 1000 / TICK_RATE;
+    this.nextTickAt = Date.now() + tickMs;
+    const loop = () => {
+      let due = 0;
+      while (Date.now() >= this.nextTickAt && due < 3) {
+        this.tick(1 / TICK_RATE);
+        this.nextTickAt += tickMs;
+        due++;
+      }
+      if (due >= 3) this.nextTickAt = Date.now() + tickMs;  // fell too far behind: resync, drop the backlog
+      this.tickIv = setTimeout(loop, Math.max(0, this.nextTickAt - Date.now()));
+    };
+    this.tickIv = setTimeout(loop, tickMs);
   }
 
   /* ── sim tick ── */
@@ -285,8 +307,13 @@ class Room {
     const evs = this.sim.ev.splice(0);
     if (evs.length) {
       // events carry full-precision floats; clients only place effects at x/y/z,
-      // so quantize before the wire (2 decimals is sub-pixel at game scale)
-      for (const e of evs) { e.x = Math.round(e.x * 100) / 100; e.y = Math.round(e.y * 100) / 100; e.z = Math.round(e.z * 100) / 100; }
+      // so quantize before the wire (2 decimals is sub-pixel at game scale).
+      // st = the sim time the event was produced: clients schedule the effect at
+      // that render time instead of playing it on packet arrival.
+      for (const e of evs) {
+        e.st = this.sim.t;
+        e.x = Math.round(e.x * 100) / 100; e.y = Math.round(e.y * 100) / 100; e.z = Math.round(e.z * 100) / 100;
+      }
       this.broadcast({ type: 'events', events: evs });
     }
 
@@ -356,7 +383,7 @@ class Room {
 
   endRace() {
     this.state = 'results';
-    if (this.tickIv) { clearInterval(this.tickIv); this.tickIv = null; }
+    if (this.tickIv) { clearTimeout(this.tickIv); this.tickIv = null; }
     this.raceEndTimer = null;
 
     const ranking = this.sim.ranking().map((p, i) => ({
@@ -559,7 +586,7 @@ httpServer.listen(PORT, HOST, () => {
     console.log(`  Lobby:       https://${cs}-${PORT}.app.github.dev/lobby.html`);
   }
   console.log('═'.repeat(60));
-  console.log(`  Tick rate: ${TICK_RATE}/s | State broadcast: ${TICK_RATE / STATE_EVERY}/s (every ${STATE_EVERY}nd tick)`);
+  console.log(`  Tick rate: ${TICK_RATE}/s | State broadcast: ${TICK_RATE / STATE_EVERY}/s (every ${STATE_EVERY} tick)`);
   console.log(`  Max rooms: ${MAX_ROOMS} | Max players/room: ${MAX_PLAYERS_PER_ROOM}`);
   console.log('═'.repeat(60));
   console.log('');

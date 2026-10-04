@@ -1574,11 +1574,23 @@ function onEvent(e) {
    relay. Their motion comes from server snapshots interpolated INTERP_DELAY behind
    the local clock; my player is predicted locally and smoothly corrected toward the
    server. Fixed 1/60 sub-steps match the server's h. See README §10. */
-const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60, BUF_CAP = 10;
+const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60;
+// Adaptive interpolation delay: instead of a fixed 100 ms, the render delay
+// eases toward a target that tracks one-way latency + arrival jitter, so slow,
+// lossy or jittery connections get more buffer (fewer starvation freezes).
+const INTERP_MIN = 0.1, INTERP_MAX = 0.4, INTERP_BASE = 0.15;
+const EXTRAP_MAX = 0.2;   // cap on how far a starved sample is extrapolated
+const BUF_AGE = 1.0;      // snapshots older than (now - BUF_AGE) are dropped (time, not count)
+let interpDelay = INTERP_DELAY;   // the smoothed delay actually used to render
+let interpTarget = INTERP_DELAY;  // where interpDelay is easing toward
+let srvOffset = null;            // smoothed (server time - client wall seconds)
 const snapBuf = [];   // raw server 'state' snapshots, oldest first
 let netMine = null;   // last server sample of my player (correction target)
 let netMineDead = false, lastNetPhase = '', needHardSnapMe = false;
 let simAcc = 0, lastSentInp = null, lastSentAt = 0;
+// Remote fire/jump/dive VFX are held until the remote's interpolated position
+// actually reaches the event's spot (flushNetEvents), not fired on arrival.
+const evQueue = [];   // { at, ev } scheduled remote events (at = the event's server time st)
 const netStats = { snaps: 0, gaps: [], rtt: -1, corr: 0, lastStateNow: 0, pingTs: 0, lastPing: 0, lastUi: 0 };
 const NEUTRAL = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
 const wrapA = a => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
@@ -1606,7 +1618,35 @@ function resetNet() {
   snapBuf.length = 0;
   netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
   simAcc = 0; lastSentInp = null; lastSentAt = 0;
+  interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
+  evQueue.length = 0;
   netStats.snaps = 0; netStats.gaps.length = 0; netStats.corr = 0; netStats.lastStateNow = 0;
+}
+
+// Refresh the adaptive-delay target from the current RTT + arrival-gap jitter.
+// Called on each state arrival. One-way latency ≈ rtt/2; jitter is how late the
+// worst recent packet was (p95 arrival gap minus the mean, over the ~60-sample
+// window already collected for the ?net=1 overlay).
+function updateDelayTarget() {
+  const oneWay = netStats.rtt >= 0 ? netStats.rtt / 2000 : 0;
+  let jitter = 0;
+  if (netStats.gaps.length > 4) {
+    const g = netStats.gaps.slice().sort((a, b) => a - b);
+    const p95 = g[(0.95 * g.length) | 0] || 0;
+    const mean = g.reduce((a, b) => a + b, 0) / g.length;
+    jitter = Math.max(0, p95 - mean) / 1000;
+  }
+  interpTarget = clamp(INTERP_BASE + oneWay + jitter * 0.5, INTERP_MIN, INTERP_MAX);
+}
+
+// Release queued remote fire/jump/dive VFX whose render time has arrived, so the
+// effect lands when the remote's interpolated position reaches that spot. Drop
+// anything that fell >250 ms behind render time (stale after a stall) instead of
+// bursting it at a position the remote has already left.
+function flushNetEvents() {
+  const rNow = sim.t - interpDelay;
+  while (evQueue.length && evQueue[0].at < rNow - 0.25) evQueue.shift();
+  while (evQueue.length && evQueue[0].at <= rNow) sim.ev.push(evQueue.shift().ev);
 }
 
 // send input only on change (+ one-shot pulses, + 100ms keep-alive) — not every frame
@@ -1622,23 +1662,38 @@ function sendMPInput(input) {
   }
 }
 
-// the two snapshots that bracket "now - INTERP_DELAY" (clamped when starved)
+// the two snapshots that bracket "now - interpDelay". When the render time has
+// overtaken the newest sample (starvation) it reports `ex` = how far (s, capped)
+// to extrapolate the newest sample forward instead of freezing.
 function lerpPair() {
   const b = snapBuf;
   if (!b.length) return null;
-  const tNow = sim.t - INTERP_DELAY;
-  if (tNow >= b[b.length - 1].t) return { a: b[b.length - 2] || b[0], b: b[b.length - 1], k: 1 };
+  const tNow = sim.t - interpDelay;
+  if (tNow >= b[b.length - 1].t) {
+    const newest = b[b.length - 1], prev = b[b.length - 2] || newest;
+    return { a: prev, b: newest, k: 1, ex: clamp(tNow - newest.t, 0, EXTRAP_MAX) };
+  }
   for (let i = b.length - 1; i >= 1; i--) {
     if (b[i - 1].t <= tNow) {
       const a = b[i - 1], c = b[i];
-      return { a, b: c, k: (c.t - a.t) > 1e-4 ? clamp((tNow - a.t) / (c.t - a.t), 0, 1) : 1 };
+      return { a, b: c, k: (c.t - a.t) > 1e-4 ? clamp((tNow - a.t) / (c.t - a.t), 0, 1) : 1, ex: 0 };
     }
   }
-  return { a: b[0], b: b[0], k: 1 };
+  return { a: b[0], b: b[0], k: 1, ex: 0 };
 }
 
 function applyNet(dt) {
   const S = sim, L = lerpPair(), remotes = [];
+  // ease the render delay toward its adaptive target (~1 s time constant, no pops)
+  interpDelay += (interpTarget - interpDelay) * (1 - Math.exp(-dt));
+  // soft clock alignment: ease the local sim clock toward the estimated server
+  // "now" (last snapshot time + time-since-arrival, smoothed) instead of
+  // hard-snapping, so a low-FPS frame never makes the whole scene jump.
+  if (srvOffset !== null) {
+    const serverNow = srvOffset + performance.now() / 1000;
+    const cerr = serverNow - S.t;
+    if (Math.abs(cerr) > 0.05) S.t += cerr * (1 - Math.exp(-10 * dt));
+  }
   if (L) {
     // remotes: network-true pos/vel/yaw before the local step — no more 15-20 Hz pulse.
     // The local step then runs neutral-input physics on them (it bleeds their
@@ -1650,9 +1705,20 @@ function applyNet(dt) {
       if (!p || !pa || !pb) continue;
       let x, y, z, vx, vy, vz, yaw;
       const dx = pb.x - pa.x, dy = pb.y - pa.y, dz = pb.z - pa.z;
+      let snapd = false;
       if (dx * dx + dy * dy + dz * dz > 64) {  // discontinuity (fall/respawn): newer sample
         x = pb.x; y = pb.y; z = pb.z; vx = pb.vx; vy = pb.vy; vz = pb.vz; yaw = pb.yaw;
+        snapd = true;
         netStats.snaps++;
+      } else if (L.ex > 0) {
+        // starved: advance the newest sample at its own velocity + yaw rate
+        // (capped at EXTRAP_MAX) instead of freezing it in place
+        x = pb.x + pb.vx * L.ex;
+        y = pb.y + pb.vy * L.ex;
+        z = pb.z + pb.vz * L.ex;
+        vx = pb.vx; vy = pb.vy; vz = pb.vz;
+        const dtl = pb.t - pa.t > 1e-4 ? pb.t - pa.t : 1e-4;
+        yaw = pb.yaw + wrapA(pb.yaw - pa.yaw) / dtl * L.ex;
       } else {
         const k = L.k;
         x = pa.x + (pb.x - pa.x) * k;
@@ -1663,21 +1729,43 @@ function applyNet(dt) {
         vz = pa.vz + (pb.vz - pa.vz) * k;
         yaw = pa.yaw + wrapA(pb.yaw - pa.yaw) * k;
       }
+      if (!snapd) {
+        // catch-up ease: after a long starvation the buffer may have been trimmed,
+        // so the two samples bracketing the render time look continuous even though
+        // the displayed position (held at the EXTRAP_MAX cap) is far behind — e.g.
+        // a remote that fell and respawned while the connection was down. The
+        // sample discontinuity guard above can't see that; close the gap over
+        // ~150 ms instead of teleporting the player.
+        const gx = x - p.x, gy = y - p.y, gz = z - p.z;
+        if (gx * gx + gy * gy + gz * gz > 64) {
+          const f = 1 - Math.exp(-12 * dt);
+          x = p.x + gx * f; y = p.y + gy * f; z = p.z + gz * f;
+          yaw = p.yaw + wrapA(yaw - p.yaw) * f;
+        }
+      }
       p.x = x; p.y = y; p.z = z; p.vx = vx; p.vy = vy; p.vz = vz; p.yaw = yaw;
       remotes.push({ p, x, y, z, vx, vy, vz, yaw });
     }
-    // crumble tiles: interpolate the falling height (state/active applied on arrival)
+    // crumble tiles: interpolate the falling height (state/active applied on arrival);
+    // when starved, keep a falling tile dropping at its recent fall rate
     for (let i = 0; i < L.b.tiles.length; i++) {
       const tb = L.b.tiles[i], tl = S.solids[tb.id], ta = L.a.tiles[i];
       if (!tl) continue;
-      const dc = tb.cy - (ta ? ta.cy : tb.cy);
-      tl.cy = dc * dc > 64 ? tb.cy : tb.cy - dc * (1 - L.k);  // respawn teleports: snap
+      const aCy = ta ? ta.cy : tb.cy;
+      const dc = tb.cy - aCy;
+      if (dc * dc > 64) { tl.cy = tb.cy; continue; }  // respawn teleports: snap
+      if (L.ex > 0) {
+        const dtl = L.b.t - L.a.t > 1e-4 ? L.b.t - L.a.t : 1e-4;
+        tl.cy = tb.cy + dc / dtl * L.ex;
+      } else {
+        tl.cy = tb.cy - dc * (1 - L.k);
+      }
     }
     // bullets: keep my live local bullets; rebuild remotes between the two samples
     for (let i = S.bullets.length - 1; i >= 0; i--) if (S.bullets[i].owner !== me) S.bullets.splice(i, 1);
     const prev = new Map();
     for (const ba of L.a.bullets) prev.set(ba.id, ba);
-    const tR = S.t - INTERP_DELAY;  // render time, same clock as lerpPair()
+    const tR = S.t - interpDelay;  // render time, same clock as lerpPair()
     for (const bb of L.b.bullets) {
       if (bb.owner === me) continue;  // my bullets live in sim.bullets, integrated locally
       const a2 = prev.get(bb.id);
@@ -1686,6 +1774,7 @@ function applyNet(dt) {
         x = a2.x + (bb.x - a2.x) * L.k;
         y = a2.y + (bb.y - a2.y) * L.k;
         z = a2.z + (bb.z - a2.z) * L.k;
+        if (L.ex > 0) { x += bb.vx * L.ex; z += bb.vz * L.ex; }  // starved: keep flying
       } else {
         // new this interval: backdate to the render time (constant-velocity flight,
         // so this is exact once it is in the air). If it hasn't cleared the muzzle
@@ -1700,23 +1789,32 @@ function applyNet(dt) {
     }
   }
   // me: smooth correction toward the (velocity-extrapolated) server position.
-  // No velocity pops; instant snap only for true discontinuities.
+  // Keep extrapolating as the sample goes stale but weight the pull down
+  // (exp(-age/0.3)) so we don't fight the server with old data; instant snap
+  // only for true discontinuities (fall/respawn, phase change, |err| > 8u).
   if (netMine) {
     const p = S.players[me];
     if (!p) return remotes;
-    const age = clamp(S.t - netMine.t, 0, 0.2);
+    const age = Math.max(0, S.t - netMine.t);
+    const w = Math.exp(-age / 0.3);
     const tx = netMine.x + netMine.vx * age, ty = netMine.y + netMine.vy * age, tz = netMine.z + netMine.vz * age;
     const ex = tx - p.x, ey = ty - p.y, ez = tz - p.z;
     netStats.corr = Math.hypot(ex, ey, ez);
-    if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 16) {  // fall/respawn, phase change, or |err| > 4u
+    if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 64) {  // fall/respawn, phase change, or |err| > 8u
       p.x = netMine.x; p.y = netMine.y; p.z = netMine.z; p.yaw = netMine.yaw;
       p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
       p.ground = netMine.ground >= 0 ? S.solids[netMine.ground] : null;
       needHardSnapMe = false; netStats.snaps++;
     } else {
-      const f = 1 - Math.exp(-10 * dt);
+      const f = (1 - Math.exp(-10 * dt)) * w;
       p.x += ex * f; p.y += ey * f; p.z += ez * f;
       p.yaw += wrapA(netMine.yaw - p.yaw) * f;
+      // ease velocity toward the server's too, so the position correction isn't
+      // immediately undone by a stale local velocity (and there's no velocity pop)
+      const fv = (1 - Math.exp(-6 * dt)) * w;
+      p.vx += (netMine.vx - p.vx) * fv;
+      p.vy += (netMine.vy - p.vy) * fv;
+      p.vz += (netMine.vz - p.vz) * fv;
     }
   }
   return remotes;
@@ -1733,8 +1831,8 @@ function update(dt, t) {
       // fixed 1/60 steps so the local sim's sub-step size matches the server's
       simAcc += dt;
       let n = 0;
-      while (simAcc >= SIM_STEP && n < 5) { sim.step(SIM_STEP, input); simAcc -= SIM_STEP; n++; }
-      if (n >= 5) simAcc = 0;  // drop backlog instead of spiral-of-death
+      while (simAcc >= SIM_STEP && n < 10) { sim.step(SIM_STEP, input); simAcc -= SIM_STEP; n++; }
+      if (n >= 10) simAcc = 0;  // drop backlog instead of spiral-of-death
       // re-apply the remote interpolation after the local step: neutral-input physics
       // would bleed their velocity and drift their position off the network truth
       for (let i = 0; i < remotes.length; i++) {
@@ -1747,6 +1845,7 @@ function update(dt, t) {
     }
   }
   if (playing) { pulse.jump = false; pulse.dive = false; }
+  if (isMP) flushNetEvents();  // release remote fire/jump/dive VFX whose render time has arrived
   for (let i = 0; i < sim.ev.length; i++) onEvent(sim.ev[i]);
   sim.ev.length = 0;
   stepParticles(dt);
@@ -1792,7 +1891,7 @@ function update(dt, t) {
       'gap p95 ' + Math.round(p95) + ' ms  ' +
       'snaps ' + netStats.snaps + '  ' +
       'corr ' + netStats.corr.toFixed(2) + ' u  ' +
-      'delay ' + Math.round(INTERP_DELAY * 1000) + ' ms';
+      'delay ' + Math.round(interpDelay * 1000) + ' ms (tgt ' + Math.round(interpTarget * 1000) + ')';
   }
 }
 
@@ -1995,10 +2094,12 @@ if (isMP) {
       sim.__mpSeed = d.seed;
       sim.bid = 1e6;  // my local bullet ids: keep them out of the server's id range
       resetNet();
-      // Apply room settings to matching objects (the server applies the same changes)
+      // Apply room settings to matching objects (the server applies the same
+      // changes in startRace — keep this list in lockstep with it)
       if (d.settings) {
         for (const s of sim.solids) {
           if (s.kind === 'spin' && d.settings.spinnerSpeed !== undefined) s.om *= d.settings.spinnerSpeed;
+          if (s.kind === 'crumble' && d.settings.crumbleHold !== undefined) s.timer = d.settings.crumbleHold;
           if (s.bounce && d.settings.bounceForce !== undefined) s.bounce = d.settings.bounceForce;
         }
       }
@@ -2034,8 +2135,14 @@ if (isMP) {
       if (netStats.gaps.length > 60) netStats.gaps.shift();
       netStats.lastStateNow = now;
       snapBuf.push(s);
-      if (snapBuf.length > BUF_CAP) snapBuf.shift();
-      if (Math.abs(sim.t - s.t) > 0.3) { sim.t = s.t; sim.raceT = s.raceT; }
+      // time-based cap: keep enough history for the adaptive delay instead of a
+      // fixed packet count, so extra buffer becomes headroom under latency
+      while (snapBuf.length > 2 && s.t - snapBuf[0].t > BUF_AGE) snapBuf.shift();
+      // soft clock alignment: record the smoothed server/client clock offset;
+      // applyNet() eases sim.t toward it instead of hard-snapping the whole scene
+      const off = s.t - now / 1000;
+      srvOffset = srvOffset === null ? off : srvOffset + (off - srvOffset) * 0.1;
+      updateDelayTarget();
       sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
       if (s.phase !== lastNetPhase) { lastNetPhase = s.phase; needHardSnapMe = true; }
       for (let i = 0; i < s.players.length; i++) {
@@ -2066,9 +2173,13 @@ if (isMP) {
       // relay fire/jump/dive for them. Everything else (bonk/hit/spark/pickup/cp/finish/
       // land/fall/respawn...) is produced by my local sim on network-true positions, so
       // relaying it too would double-play; my own events are always local.
+      // Each is scheduled for the render time when the remote reaches its spot
+      // (ev.st, the server time the server stamped it) rather than firing now.
       const events = e.data.data.filter(ev => ev.id !== me && ev.by !== me &&
         (ev.t === 'fire' || ev.t === 'jump' || ev.t === 'dive'));
-      sim.ev.push(...events);
+      for (const ev of events) {
+        evQueue.push({ at: typeof ev.st === 'number' ? ev.st : sim.t - interpDelay, ev });
+      }
     }
     else if (e.data.type === 'mp_pong') {
       netStats.rtt = performance.now() - e.data.ts;
