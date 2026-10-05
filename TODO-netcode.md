@@ -32,6 +32,36 @@ the fix: 0.07 u / 0.45 u/s; reverted: 0.56 u / 4.6 u/s). See README §10.
 
 - **Edge slide / release lag**: surfaced the "release with room to spare, then the character slides forward over the edge and falls" bug (analysis.txt). The own-player x/z correction chased the server sample, which reflects inputs a full round trip old, so on-screen trailed the pure local prediction by ~v·rtt (the correction read as "bounded" because it measured the error *to the stale target*, not to the prediction). Fixed by splitting the own-player correction into vertical (unchanged: sample-age gate, ballistic target, gravity-owns-`vy`) and horizontal (x/z): the x/z target is extrapolated ahead of the sample by a damped fraction of the RTT (`LOOKAHEAD = 0.3`, capped at `LOOKAHEAD_MAX = 0.12 s` so high-latency lines don't lead by several units), and the x/z correction is held off for a full `rtt + 1 tick` after any real input change. Verified against a solo-sim reference, not just `corr`: new hard assertion in `test_mp_client_sim.js` (on-screen vs solo, last-third mean < 0.75 u — fix: 0.61 u; pre-fix: 0.84 u) and a new `test_mp_release.js` (run toward a platform edge, release with a margin sized to beat uplink+coast; asserts on-screen tracks the solo prediction and the authoritative body makes the landing). The look-ahead is deliberately damped to 0.3 (not the full RTT from the analysis): a full-RTT lead shifts the local sim's own trajectory enough to change bonk/arc timing on obstacle courses and breaks the solo-arc guard.
 
+**Frontend audit round** (2026-10-05): a full pass over the client + lobby MP
+logic (client netcode block, relay chain, room messaging) found four gaps, all
+fixed and covered by new assertions in `test_mp_client_sim.js` / reviewed in the
+lobby:
+
+- **Smoothed RTT estimate** (`updateRtt()` in `sim-race-webgl.html`): the
+  `mp_pong` handler assigned the raw single-ping RTT. One GC pause or tab switch
+  showed up as a 3–5 s sample that clamped the input-confirmation gates to their
+  1.2 s worst case and pushed the adaptive-delay target to its 0.4 s cap for a
+  full second (pings are 1 Hz, so recovery was ≥1 s) — the same "actions render
+  after a delay" symptom on spiky lines. Samples are now clamped to 1200 ms
+  (the gates' own worst case, so a truly slow line behaves as before), non-
+  positive samples dropped, and fed through an EMA (α = 0.4). New assertions:
+  a 4 s spike leaves gate rtt at 0.66 s (vs 1.20 s raw), recovery to 328 ms in
+  5 clean pings, and sustained degradation still tracks up (762 ms after 5× 800
+  ms pings).
+- **`evQueue` time ordering** (`flushNetEvents()`): the stale-drop/release loops
+  only look at the queue head, but an event can arrive late with an older `st`
+  (or the st-less fallback stamped at the later arrival time) and sit in front
+  of a due event — the VFX would play late. The queue is now sorted by `at`
+  before processing. New assertion: out-of-order arrival releases in time order.
+- **`resetNet()` clears RTT state** (`rttEst`, `netStats.rtt`, `lastPing`): a
+  rematch no longer inherits the previous race's RTT estimate, and the probe
+  re-fires promptly after a fresh race.
+- **Lobby flow fixes** (`lobby.html` + `sim-race-webgl.html`): `kicked` now
+  hides the still-running game iframe (the `raceEnd` path did, `kicked` didn't
+  — a kicked player saw the live race under the menu). And the game re-sends
+  `mp_ready` after a successful rematch re-init, so the lobby's 500 ms init
+  retry loop stops instead of re-initing the running race forever.
+
 Remaining: manual playtest matrix (4.2) and the optional revert flag (4.3).
 
 ## Phase 1: Client smoothing fixes (highest impact, low risk, client-only)
@@ -126,6 +156,23 @@ Remaining: manual playtest matrix (4.2) and the optional revert flag (4.3).
     sample by several units on high-latency lines (S3). Damping to 0.3·rtt
     (cap 0.12 s) keeps the arc, keeps on-screen within a fraction of an RTT of
     the server sample, and still recovers the release margin.
+
+## Phase 6: Frontend robustness (audit round, 2026-10-05)
+
+- [x] **6.1 — Smoothed RTT estimate** (`updateRtt()`, pong handler)
+  - raw single-ping RTT → clamped (≤ 1200 ms = the gates' own worst case) EMA
+    (α = 0.4); non-positive samples dropped. A 4 s tab-switch/GC spike now
+    leaves gate rtt at 0.66 s instead of pinning the 1.2 s worst case for a
+    full second; recovers to 328 ms in 5 clean pings; sustained degradation
+    still tracks up (762 ms after 5× 800 ms).
+- [x] **6.2 — `evQueue` sorted before flush** — stale-drop/release loops only
+  see the head; a late-arriving older event used to block a due one.
+- [x] **6.3 — `resetNet()` clears RTT state** (`rttEst`, `netStats.rtt`,
+  `lastPing`) so rematches start cold and the probe re-fires promptly.
+- [x] **6.4 — Lobby flow fixes** — `kicked` hides the game iframe; the game
+  re-acks `mp_ready` after a rematch re-init so the lobby's 500 ms init retry
+  loop stops.
+- [x] **6.5 — Regression tests** in `test_mp_client_sim.js` (5 new assertions).
 
 ## Notable design decisions from testing
 

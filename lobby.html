@@ -637,6 +637,9 @@ function handleMessage(msg) {
 
     case 'kicked':
       roomCode = null; isHost = false;
+      // drop the live game iframe (raceEnd does the same) — otherwise the
+      // still-running race stays visible on top of the menu
+      $('gameIframe').style.display = 'none';
       showScreen('screenMenu');
       toast('You were kicked from the room.', true);
       break;

@@ -1607,6 +1607,7 @@ let simAcc = 0, lastSentInp = null, lastSentAt = 0, lastInpAt = 0;
 // actually reaches the event's spot (flushNetEvents), not fired on arrival.
 const evQueue = [];   // { at, ev } scheduled remote events (at = the event's server time st)
 const netStats = { snaps: 0, gaps: [], rtt: -1, corr: 0, lastStateNow: 0, pingTs: 0, lastPing: 0, lastUi: 0 };
+let rttEst = -1;  // smoothed RTT estimate (ms) — see updateRtt()
 const NEUTRAL = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
 const wrapA = a => { while (a > Math.PI) a -= TAU; while (a < -Math.PI) a += TAU; return a; };
 
@@ -1636,6 +1637,27 @@ function resetNet() {
   interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
   evQueue.length = 0;
   netStats.snaps = 0; netStats.gaps.length = 0; netStats.corr = 0; netStats.lastStateNow = 0;
+  // RTT state must not leak across rematches, and the probe should re-fire
+  // promptly after a fresh race (lastPing = 0 → the 1 Hz gate is open)
+  rttEst = -1; netStats.rtt = -1; netStats.lastPing = 0;
+}
+
+// Feed one RTT sample (ms) into the estimate. A single raw ping is too noisy to
+// drive the netcode: a GC pause or tab switch shows up as a 3-5 s sample that
+// would clamp the input-confirmation gates to their worst case (1.2 s) and push
+// the interpolation delay target to its cap for a full second — the "actions
+// render after a delay" symptom on spiky lines. So: drop non-positive samples
+// (clock glitches), clamp the rest to the gates' own worst case (nothing is
+// lost above it — a truly slow line gets the same worst-case behavior as
+// before), and smooth with an EMA (α = 0.4 → ~2 s time constant at the 1 Hz
+// probe), so a single spike degrades the estimate for a fraction of a second
+// instead of pinning it.
+function updateRtt(sampleMs) {
+  if (!(sampleMs > 0)) return;
+  const s = Math.min(sampleMs, 1200);
+  const a = 0.4;
+  rttEst = rttEst < 0 ? s : rttEst + (s - rttEst) * a;
+  netStats.rtt = rttEst;
 }
 
 // Refresh the adaptive-delay target from the current RTT + arrival-gap jitter.
@@ -1660,6 +1682,11 @@ function updateDelayTarget() {
 // bursting it at a position the remote has already left.
 function flushNetEvents() {
   const rNow = sim.t - interpDelay;
+  // the stale-drop and release loops below only look at the queue head, so the
+  // queue must be in time order — an event that arrives late with an older st
+  // (or the st-less fallback stamped at the later arrival) would otherwise sit
+  // behind a newer one and never be dropped/released on time.
+  evQueue.sort((a, b) => a.at - b.at);
   while (evQueue.length && evQueue[0].at < rNow - 0.25) evQueue.shift();
   while (evQueue.length && evQueue[0].at <= rNow) sim.ev.push(evQueue.shift().ev);
 }
@@ -2197,6 +2224,9 @@ if (isMP) {
       $('touch').classList.toggle('hidden', !touchOn);
       veilOn = false; $('veil').classList.remove('on'); $('count').textContent = ''; $('ammo').classList.remove('hidden');
       buildDots();
+      // re-ack so the lobby can stop its 500 ms init retry loop after a
+      // rematch re-init (it only receives mp_ready once at load otherwise)
+      if (mpHost) mpHost.postMessage({ type: 'mp_ready' }, '*');
     }
     else if (e.data.type === 'mp_state' && sim) {
       const s = decodeState(e.data.data);  // compact wire arrays → legacy shape
@@ -2252,7 +2282,7 @@ if (isMP) {
       }
     }
     else if (e.data.type === 'mp_pong') {
-      netStats.rtt = performance.now() - e.data.ts;
+      updateRtt(performance.now() - e.data.ts);  // smoothed — see updateRtt()
     }
   });
 } else {

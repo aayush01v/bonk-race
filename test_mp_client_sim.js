@@ -82,6 +82,7 @@ function resetAll() { resetNet(); lastNetPhase = ''; needHardSnapMe = false; net
 const factory = new Function('TAU', 'Sim', 'clamp', 'sim', 'me', 'mpHost', 'performance',
   netBlock + '\n' + onStateSrc +
   '\nreturn { applyNet, lerpPair, sendMPInput, onState, resetAll, netStats, snapBuf, ' +
+  'evQueue, flushNetEvents, updateRtt, ' +
   'get interpDelay() { return interpDelay; }, get interpTarget() { return interpTarget; } };');
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -352,6 +353,46 @@ ok(ownBulletAliveWhileServerBlind, 'own local bullet survives rebuild while serv
 const bufWin = api.snapBuf.length > 1 ? api.snapBuf[api.snapBuf.length - 1].t - api.snapBuf[0].t : 0;
 ok(bufWin > 0.9 && bufWin <= 1.05,
   `snapshot buffer holds the ~1 s time window (shipped BUF_AGE; ${bufWin.toFixed(2)} s, ${api.snapBuf.length} samples)`);
+
+// ── RTT estimator: one bad ping must not clamp the netcode to worst case ──
+// mp_pong feeds updateRtt (clamped EMA), not a raw assignment. A GC pause or
+// tab switch used to show up as one 4 s sample that would hold the
+// input-confirmation gates at their 1.2 s clamp and the delay target at its cap
+// for a full second — "actions render after a delay" on spiky lines.
+{
+  api.resetAll();  // also clears the RTT state (a rematch starts cold)
+  for (let i = 0; i < 4; i++) api.updateRtt(300);
+  const base = api.netStats.rtt;
+  api.updateRtt(4000);  // the spike: tab suspend / long GC
+  const spiked = api.netStats.rtt;
+  const gateRtt = m => clamp(m / 1000, 2 / 30, 1.2);  // applyNet()'s own clamp
+  ok(Math.abs(base - 300) < 30, `RTT estimate tracks a stable line (${base.toFixed(0)} ms after 4 pings)`);
+  ok(gateRtt(spiked) < 0.75,
+    `a 4 s ping spike stays off the worst-case gate (gate rtt ${gateRtt(spiked).toFixed(2)} s after the spike; a raw assignment gives ${gateRtt(4000).toFixed(2)} s)`);
+  for (let i = 0; i < 5; i++) api.updateRtt(300);
+  ok(api.netStats.rtt <= 340, `estimate recovers to the line after the spike (${api.netStats.rtt.toFixed(0)} ms after 5 clean pings)`);
+  api.updateRtt(300);
+  for (let i = 0; i < 5; i++) api.updateRtt(800);  // a SUSTAINED degradation must still be tracked…
+  ok(api.netStats.rtt >= 700,
+    `…and sustained degradation is not hidden by the smoothing (${api.netStats.rtt.toFixed(0)} ms after 5× 800 ms pings)`);
+}
+
+// ── evQueue: a late-arriving older event must not block a due newer one ──
+// flushNetEvents() only looks at the queue head, so the queue must be in time
+// order; an event stamped with an older st that arrives later would otherwise
+// sit in front of the due one and the VFX would play late.
+{
+  const rNow = cl.t - api.interpDelay;  // the live render time flushNetEvents() uses
+  api.evQueue.length = 0;
+  cl.ev.length = 0;
+  api.evQueue.push({ at: rNow + 0.05, ev: { t: 'jump', id: 1 } });  // newer, not due yet
+  api.evQueue.push({ at: rNow - 0.08, ev: { t: 'fire', id: 1 } });  // older, due now — arrived last
+  api.flushNetEvents();
+  const fired = cl.ev.map(e => e.t);
+  ok(fired.length === 1 && fired[0] === 'fire' && api.evQueue.length === 1,
+    `out-of-order queued event releases in time order (fired [${fired.join(', ')}] — the due fire released, the not-yet-due jump still queued)`);
+  api.evQueue.length = 0; cl.ev.length = 0;
+}
 
 console.log('\n' + (failures === 0 ? 'CLIENT NETCODE: ALL PASS' : `CLIENT NETCODE: ${failures} FAILURE(S)`));
 process.exit(failures === 0 ? 0 : 1);
