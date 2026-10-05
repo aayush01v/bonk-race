@@ -1580,6 +1580,16 @@ const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60;
 // lossy or jittery connections get more buffer (fewer starvation freezes).
 const INTERP_MIN = 0.1, INTERP_MAX = 0.4, INTERP_BASE = 0.15;
 const EXTRAP_MAX = 0.2;   // cap on how far a starved sample is extrapolated
+// How far past the (one-way-stale) server sample the own-player x/z correction
+// target is extrapolated, as a fraction of the RTT. The server sample trails the
+// true local prediction by ~one uplink of motion; extrapolating a fraction of an
+// RTT ahead makes on-screen track (slightly lead) the prediction so a release is
+// judged on real margin instead of a lagging ghost. Damped to 0.3 rather than the
+// full 1.0: a full-RTT lead shifts the local sim's own trajectory enough to change
+// bonk/arc timing on obstacle courses (breaks the solo-arc guard). Capped in time
+// (LOOKAHEAD_MAX) so a very high-latency line doesn't make on-screen race ahead of
+// the authoritative sample by several units.
+const LOOKAHEAD = 0.3, LOOKAHEAD_MAX = 0.12;
 const BUF_AGE = 1.0;      // snapshots older than (now - BUF_AGE) are dropped (time, not count)
 let interpDelay = INTERP_DELAY;   // the smoothed delay actually used to render
 let interpTarget = INTERP_DELAY;  // where interpDelay is easing toward
@@ -1796,32 +1806,50 @@ function applyNet(dt) {
       S.bullets.push({ id: bb.id, owner: bb.owner, vx: bb.vx, vz: bb.vz, life: 99, x, y, z });
     }
   }
-  // me: smooth correction toward the (velocity-extrapolated) server position.
-  // Four layers keep it from ever feeling like a tug against your own motion:
-  //  - input-confirmation window: until the server has had uplink time to see
-  //    our latest input, no sample can contain it — correcting toward such a
-  //    sample pulls the local prediction backward (the "sticky jump" tug on
-  //    takeoff), so the drift correction is held off;
-  //  - airborne arc ownership: in the air the pull is ×0.2 (vy untouched) —
-  //    the local sim is the solo player here, and the server's copy of the
-  //    flight arrives a tick late; the offset closes on landing;
-  //  - ballistic target: while the sample is airborne, gravity curves the
-  //    extrapolation, so a straight y + vy·age drags the apex by ½g·age²;
-  //  - on the ground the full correction runs (linear extrapolation is ~exact
-  //    there, which is what absorbs the landing offset and any bonk/fall drift).
-  // Weight decays exp(-age/0.3) as the sample goes stale; instant snap only
-  // for true discontinuities (fall/respawn, phase change, |err| > 8u) — those
-  // are events, not drift, and the confirmation window never covers them.
+  // me: smooth correction toward the server position. The vertical (y) and
+  // horizontal (x/z) axes are corrected differently, because the server's copy
+  // of *us* is stale in different ways:
+  //  - Vertical (jump/dive) keeps the sample-age logic untouched: the local sim
+  //    owns the arc (airborne pull ×0.2, gravity-owns-vy, ballistic target
+  //    y + vy·age − ½g·age²) and the server's flight is only a tick late, so
+  //    extrapolating y by the sample age is already near-exact.
+  //  - Horizontal (x/z) is where "on-screen lags pure prediction" came from:
+  //    a sample reflects the input the server had when it ticked — our latest
+  //    input only reaches it after the uplink and the sample comes back after
+  //    the downlink, so the sample's x/z trail the true local prediction.
+  //    Correcting toward `pos + v·age` drags the player backward toward that
+  //    stale sample (visible as the character sliding forward over the edge
+  //    after a release, having "stopped" later than the player expected). So:
+  //     * extrapolate the x/z target ahead of the sample by a *damped* fraction
+  //       of the RTT (LOOKAHEAD·rtt, capped at LOOKAHEAD_MAX) — enough to bring
+  //       on-screen back in line with the local prediction (it even leads it
+  //       slightly, so a release is judged on real margin), without shifting the
+  //       local sim's own trajectory far enough to change bonk/arc timing;
+  //     * hold the x/z correction off for a full rtt + one tick after any real
+  //       input change — exactly the time for that input to go up, be applied on
+  //       the next tick, and come back, so the correction never resumes against
+  //       a sample that still carries the *previous* input's velocity.
+  //  - airborne arc ownership: in the air the whole pull is ×0.2 and vy is left
+  //    to gravity (the local sim is the solo player mid-flight).
+  // Weight decays exp(-age/0.3) as the sample goes stale; instant snap only for
+  // true discontinuities (fall/respawn, phase change, |err| > 8u) — those are
+  // events, not drift, and no confirmation window covers them.
   if (netMine) {
     const p = S.players[me];
     if (!p) return remotes;
     const age = Math.max(0, S.t - netMine.t);
-    const uplink = clamp(netStats.rtt >= 0 ? netStats.rtt / 2000 : 1 / 30, 1 / 30, 0.6);
-    const wInp = clamp((S.t - lastInpAt - uplink) / 0.1, 0, 1);  // 100 ms ramp: no weight pop on re-entry
-    const w = Math.exp(-age / 0.3) * wInp;
-    const tx = netMine.x + netMine.vx * age;
+    const rtt = clamp(netStats.rtt >= 0 ? netStats.rtt / 1000 : 2 / 30, 2 / 30, 1.2);  // full round trip, s
+    const uplink = rtt / 2;
+    // Vertical gate: original sample-age window (uplink) — jump-arc protection.
+    const wInpY = clamp((S.t - lastInpAt - uplink) / 0.1, 0, 1);  // 100 ms ramp: no weight pop on re-entry
+    const wY = Math.exp(-age / 0.3) * wInpY;
+    // Horizontal gate: hold off for a full RTT + one tick after an input change.
+    const wInpXZ = clamp((S.t - lastInpAt - (rtt + 1 / 30)) / 0.1, 0, 1);
+    const wXZ = Math.exp(-age / 0.3) * wInpXZ;
+    const lookAhead = Math.min(rtt * LOOKAHEAD, LOOKAHEAD_MAX);  // cap so high-RTT lines don't lead by several units
+    const tx = netMine.x + netMine.vx * (age + lookAhead);  // x: look ahead past the stale sample
+    const tz = netMine.z + netMine.vz * (age + lookAhead);  // z: look ahead past the stale sample
     const ty = netMine.y + netMine.vy * age - (netMine.ground < 0 ? 0.5 * Sim.K.GRAV * age * age : 0);
-    const tz = netMine.z + netMine.vz * age;
     const ex = tx - p.x, ey = ty - p.y, ez = tz - p.z;
     netStats.corr = Math.hypot(ex, ey, ez);
     if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 64) {  // fall/respawn, phase change, or |err| > 8u
@@ -1836,15 +1864,20 @@ function applyNet(dt) {
       // on landing the full grounded correction closes the ~0.2 u offset in
       // ~0.2 s — far under the 8 u snap guard, so it reads as nothing.
       const airW = p.ground ? 1 : 0.2;
-      const f = (1 - Math.exp(-10 * dt)) * w * airW;
-      p.x += ex * f; p.y += ey * f; p.z += ez * f;
-      p.yaw += wrapA(netMine.yaw - p.yaw) * f;
+      // Horizontal ease uses the RTT-gated weight; vertical keeps the sample-age
+      // gate so the jump arc stays locally owned.
+      const fXZ = (1 - Math.exp(-10 * dt)) * wXZ * airW;
+      const fY = (1 - Math.exp(-10 * dt)) * wY * airW;
+      p.x += ex * fXZ; p.z += ez * fXZ;
+      p.y += ey * fY;
+      p.yaw += wrapA(netMine.yaw - p.yaw) * fXZ;
       // ease velocity toward the server's too, so the position correction isn't
       // immediately undone by a stale local velocity (and there's no velocity pop)
-      const fv = (1 - Math.exp(-6 * dt)) * w * airW;
-      p.vx += (netMine.vx - p.vx) * fv;
-      p.vz += (netMine.vz - p.vz) * fv;
-      if (p.ground) p.vy += (netMine.vy - p.vy) * fv;  // in the air, gravity owns vy
+      const fvXZ = (1 - Math.exp(-6 * dt)) * wXZ * airW;
+      const fvY = (1 - Math.exp(-6 * dt)) * wY * airW;
+      p.vx += (netMine.vx - p.vx) * fvXZ;
+      p.vz += (netMine.vz - p.vz) * fvXZ;
+      if (p.ground) p.vy += (netMine.vy - p.vy) * fvY;  // in the air, gravity owns vy
     }
   }
   return remotes;

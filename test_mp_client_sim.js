@@ -183,6 +183,9 @@ const DELIVERY = 3;
 const outQ = [];  // { at, snap } — delivery queue ordered by arrival tick
 const myInputDelay = []; // my local input, applied to the server one tick late
 const remoteErr = [], myErr = [], bulletErr = [];
+const soloErrZ = [];   // on-screen (corrected) z vs the SOLO reference z — the "feels like solo" gap
+const soloSrvGap = []; // solo z minus authoritative-server z (how stale the server ref itself is)
+let soloRefP95 = 0, soloRefMean = 0;  // on-screen vs solo, last-third (set by the diagnostics block)
 let vzDecayFrames = 0, vzFrames = 0;
 let ownBulletAliveWhileServerBlind = false;
 let simAcc = 0, soloAcc = 0;
@@ -245,6 +248,13 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   }
   const refMe = srvPosAt(ME, cl.t);
   if (refMe.gap <= 4) myErr.push(Math.hypot(cl.players[ME].z - refMe.z));
+  // solo reference: the on-screen player must track the no-netcode solo sim
+  // (the true local prediction), not just stay close to the stale server sample.
+  {
+    const sp = solo.players[0];
+    soloErrZ.push(Math.abs(cl.players[ME].z - sp.z));
+    soloSrvGap.push(sp.z - srv.players[ME].z);
+  }
   for (const b of cl.bullets) {
     if (b.owner === ME) {
       const onServer = srv.bullets.some(sb => Math.abs(sb.x - b.x) < 0.01 && Math.abs(sb.z - b.z) < 0.01);
@@ -267,6 +277,20 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
 
 const p95 = (a, q) => { const s = a.slice().sort((x, y) => x - y); return s[Math.max(0, ((q * s.length) | 0))] || 0; };
 const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
+
+// Solo-reference stats over the last third of the run (settled running). This is
+// the "feels like solo" signal the brief asks us to verify against — NOT the
+// server/corr, which the pre-fix correction was happily chasing while it trailed
+// the true local prediction.
+{
+  const lo = Math.floor(soloErrZ.length * 0.66);
+  const seg = a => a.slice(lo);
+  soloRefP95 = p95(seg(soloErrZ), 0.95);
+  soloRefMean = mean(seg(soloErrZ));
+  console.log(`  [diag] solo-ref   p95 ${soloRefP95.toFixed(3)} u  mean ${soloRefMean.toFixed(3)} u  (on-screen vs pure prediction)`);
+  console.log(`  [diag] server-ref p95 ${p95(seg(myErr), 0.95).toFixed(3)} u  mean ${mean(seg(myErr)).toFixed(3)} u  (on-screen vs stale server sample)`);
+  console.log(`  [diag] solo-srv   p95 ${p95(seg(soloSrvGap).map(Math.abs), 0.95).toFixed(3)} u  mean ${mean(seg(soloSrvGap).map(Math.abs)).toFixed(3)} u  (pure prediction vs server — the intrinsic RTT offset)`);
+}
 
 // ── solo-arc analysis: does the MP client's own jump feel like the solo sim's? ──
 // Flight windows come from the SOLO reference (its ground state); each window is
@@ -317,7 +341,12 @@ if (cleanFlights.length >= 2) {
 console.log(`client netcode vs authoritative sim (15 s, 1-tick input delay, ${DELIVERY}-tick delivery):`);
 ok(p95(remoteErr, 0.95) < 0.6, `remotes track server interpolation (p95 err ${p95(remoteErr, 0.95).toFixed(2)} u, mean ${mean(remoteErr).toFixed(2)} u over ${remoteErr.length} frames)`);
 ok(vzDecayFrames === 0, `no remote velocity decay: ${vzDecayFrames}/${vzFrames} frames with server vz>5 u/s but client vz<2.5`);
-ok(p95(myErr, 0.95) < 1.0, `own-player correction bounded (p95 ${p95(myErr, 0.95).toFixed(2)} u, mean ${mean(myErr).toFixed(2)} u)`);
+ok(p95(myErr, 0.95) < 1.2, `own-player correction bounded vs the server sample (p95 ${p95(myErr, 0.95).toFixed(2)} u, mean ${mean(myErr).toFixed(2)} u — the x/z look-ahead intentionally sits a fraction of an RTT ahead of the stale sample)`);
+// The real signal: on-screen must track the pure local prediction (solo), not just
+// stay near the stale server sample. Pre-fix the correction dragged on-screen
+// toward the server and trailed the prediction (last-third mean ~0.84 u @ 200 ms
+// RTT); the RTT look-ahead + input-confirmation gate close that gap to ~0.6 u.
+ok(soloRefMean < 0.75, `on-screen tracks the solo prediction (last-third mean |Δz| ${soloRefMean.toFixed(2)} u vs pure local prediction — pre-fix it trailed the server sample by ~0.84 u and the release/edge was misjudged)`);
 ok(bulletErr.length > 10 && p95(bulletErr, 0.95) < 1.0, `remote bullets rebuilt by id track server (${bulletErr.length} samples, p95 ${bulletErr.length ? p95(bulletErr, 0.95).toFixed(2) : '--'} u)`);
 ok(ownBulletAliveWhileServerBlind, 'own local bullet survives rebuild while server hasn\'t seen it');
 const bufWin = api.snapBuf.length > 1 ? api.snapBuf[api.snapBuf.length - 1].t - api.snapBuf[0].t : 0;
