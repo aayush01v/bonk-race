@@ -76,6 +76,7 @@ function onState(raw) {
       const dead = sp.dead > 0;
       if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }
       netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };
+      if (typeof reconcileOwn === 'function') reconcileOwn(s, sp, now / 1000);
     }
   }
   for (const st of s.tiles) {
@@ -90,7 +91,7 @@ function resetAll() { resetNet(); lastNetPhase = ''; needHardSnapMe = false; net
 // performance is a VIRTUAL clock in lockstep with sim time (see client_sim test).
 const factory = new Function('TAU', 'Sim', 'clamp', 'sim', 'me', 'mpHost', 'performance',
   netBlock + '\n' + onStateSrc +
-  '\nreturn { applyNet, sendMPInput, onState, resetAll, netStats };');
+  '\nreturn { applyNet, sendMPInput, onState, resetAll, netStats, ownHist };');
 
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const NEUTRAL = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
@@ -203,6 +204,13 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   let n = 0;
   while (simAcc >= STEP && n < 10) { cl.step(STEP, mine); simAcc -= STEP; n++; }
   if (n >= 10) simAcc = 0;
+  
+  const pm = cl.players[ME];
+  if (pm) {
+    const w = vNowMs / 1000 + TICK;
+    api.ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground });
+    while (api.ownHist.length && api.ownHist[0].w < w - 2.5) api.ownHist.shift();
+  }
 
   // solo reference: identical sim, only Me, same input, no netcode
   soloAcc += TICK;

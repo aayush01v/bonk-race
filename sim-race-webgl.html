@@ -1580,16 +1580,12 @@ const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60;
 // lossy or jittery connections get more buffer (fewer starvation freezes).
 const INTERP_MIN = 0.1, INTERP_MAX = 0.4, INTERP_BASE = 0.15;
 const EXTRAP_MAX = 0.2;   // cap on how far a starved sample is extrapolated
-// How far past the (one-way-stale) server sample the own-player x/z correction
-// target is extrapolated, as a fraction of the RTT. The server sample trails the
-// true local prediction by ~one uplink of motion; extrapolating a fraction of an
-// RTT ahead makes on-screen track (slightly lead) the prediction so a release is
-// judged on real margin instead of a lagging ghost. Damped to 0.3 rather than the
-// full 1.0: a full-RTT lead shifts the local sim's own trajectory enough to change
-// bonk/arc timing on obstacle courses (breaks the solo-arc guard). Capped in time
-// (LOOKAHEAD_MAX) so a very high-latency line doesn't make on-screen race ahead of
-// the authoritative sample by several units.
-const LOOKAHEAD = 0.3, LOOKAHEAD_MAX = 0.12;
+// Own-player reconciliation state (see reconcileOwn()). A short history of where WE
+// predicted ourselves to be lets a server sample be compared with the prediction at
+// the MATCHING moment instead of with where we are now.
+const ownHist = [];                    // { w, x, y, z, g }: predicted pos at client wall time w (s)
+const ownPend = { x: 0, y: 0, z: 0 };  // correction still to be eased in
+const OWN_DZ = 0.35;                   // u: residual below this is alignment noise — ignored
 const BUF_AGE = 1.0;      // snapshots older than (now - BUF_AGE) are dropped (time, not count)
 let interpDelay = INTERP_DELAY;   // the smoothed delay actually used to render
 let interpTarget = INTERP_DELAY;  // where interpDelay is easing toward
@@ -1640,6 +1636,7 @@ function resetNet() {
   // RTT state must not leak across rematches, and the probe should re-fire
   // promptly after a fresh race (lastPing = 0 → the 1 Hz gate is open)
   rttEst = -1; netStats.rtt = -1; netStats.lastPing = 0;
+  ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0;
 }
 
 // Feed one RTT sample (ms) into the estimate. A single raw ping is too noisy to
@@ -1701,6 +1698,7 @@ function sendMPInput(input) {
     // re-arm the confirmation window only for real new inputs; the 100 ms
     // keep-alive resend carries no new information for the server
     if (changed || input.jump || input.dive) lastInpAt = sim.t;
+    input.t = sim.t; // add timestamp for server-side jitter buffering
     mpHost.postMessage({ type: 'mp_input', input }, '*');
     lastSentInp = { mx: input.mx, mz: input.mz, fire: input.fire };
     lastSentAt = now;
@@ -1726,6 +1724,65 @@ function lerpPair() {
   }
   return { a: b[0], b: b[0], k: 1, ex: 0 };
 }
+
+// <own-reconcile-fns>
+// A server sample only reflects the inputs the server had received when it ticked,
+// i.e. our prediction from about one RTT ago. Comparing it with where we are NOW
+// reads as a phantom error of ~v·rtt and drags the player back toward a ghost — the
+// "stops, then slides forward over the edge" bug. So the sample is compared with what
+// we predicted at the matching moment; with no real divergence that error is ~0 and
+// nothing is applied. Only the excess over OWN_DZ is eased in, and the same offset is
+// added to the history so the next sample doesn't count it twice. Velocity is never
+// touched (the local sim stays the solo prediction); y is only reconciled while both
+// the history and the sample are grounded (the local sim owns jump arcs).
+function reconcileOwn(s, sp, tArr) {
+  if (needHardSnapMe || !ownHist.length) return;
+  const rtt = netStats.rtt >= 0 ? netStats.rtt / 1000 : 0.1;
+  // production time on the client clock plus the mean downlink, from the server
+  // timestamp, so downlink jitter doesn't leak into the alignment (arrival as fallback)
+  const base = srvOffset !== null ? s.t - srvOffset : tArr;
+  const tm = base - rtt / 2;  // The server sample sp incorporates inputs up to base - uplink, so it matches client at base - uplink!
+  let h = null;
+  for (let i = ownHist.length - 1; i >= 1; i--) {
+    const a = ownHist[i - 1], b = ownHist[i];
+    if (a.w <= tm && tm <= b.w) {
+      const k = b.w > a.w ? (tm - a.w) / (b.w - a.w) : 1;
+      h = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: a.z + (b.z - a.z) * k, g: a.g && b.g };
+      break;
+    }
+  }
+  if (!h) return;
+  const ex = sp.x - h.x, ey = sp.y - h.y, ez = sp.z - h.z;
+  if (ex * ex + ey * ey + ez * ez > 64) { needHardSnapMe = true; return; }  // |err| > 8 u
+  const mag = Math.hypot(ex, ez);
+  if (mag > OWN_DZ) {
+    const k = (mag - OWN_DZ) / mag, px = ex * k, pz = ez * k;
+    ownPend.x += px; ownPend.z += pz;
+    for (const e of ownHist) { e.x += px; e.z += pz; }
+  }
+  if (h.g && sp.ground >= 0 && Math.abs(ey) > 0.3) {
+    const py = ey - Math.sign(ey) * 0.3;
+    ownPend.y += py;
+    for (const e of ownHist) e.y += py;
+  }
+}
+
+function applyOwnCorrection(p, dt) {
+  if (needHardSnapMe) {  // fall/respawn, phase change, |err| > 8 u: events, not drift
+    p.x = netMine.x; p.y = netMine.y; p.z = netMine.z; p.yaw = netMine.yaw;
+    p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
+    p.ground = netMine.ground >= 0 ? sim.solids[netMine.ground] : null;
+    needHardSnapMe = false; netStats.snaps++;
+    ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0;
+  } else {
+    const f = 1 - Math.exp(-12 * dt);
+    const dx = ownPend.x * f, dy = ownPend.y * f, dz = ownPend.z * f;
+    p.x += dx; p.y += dy; p.z += dz;
+    ownPend.x -= dx; ownPend.y -= dy; ownPend.z -= dz;
+  }
+  netStats.corr = Math.hypot(ownPend.x, ownPend.y, ownPend.z);
+}
+// </own-reconcile-fns>
 
 function applyNet(dt) {
   const S = sim, L = lerpPair(), remotes = [];
@@ -1833,79 +1890,13 @@ function applyNet(dt) {
       S.bullets.push({ id: bb.id, owner: bb.owner, vx: bb.vx, vz: bb.vz, life: 99, x, y, z });
     }
   }
-  // me: smooth correction toward the server position. The vertical (y) and
-  // horizontal (x/z) axes are corrected differently, because the server's copy
-  // of *us* is stale in different ways:
-  //  - Vertical (jump/dive) keeps the sample-age logic untouched: the local sim
-  //    owns the arc (airborne pull ×0.2, gravity-owns-vy, ballistic target
-  //    y + vy·age − ½g·age²) and the server's flight is only a tick late, so
-  //    extrapolating y by the sample age is already near-exact.
-  //  - Horizontal (x/z) is where "on-screen lags pure prediction" came from:
-  //    a sample reflects the input the server had when it ticked — our latest
-  //    input only reaches it after the uplink and the sample comes back after
-  //    the downlink, so the sample's x/z trail the true local prediction.
-  //    Correcting toward `pos + v·age` drags the player backward toward that
-  //    stale sample (visible as the character sliding forward over the edge
-  //    after a release, having "stopped" later than the player expected). So:
-  //     * extrapolate the x/z target ahead of the sample by a *damped* fraction
-  //       of the RTT (LOOKAHEAD·rtt, capped at LOOKAHEAD_MAX) — enough to bring
-  //       on-screen back in line with the local prediction (it even leads it
-  //       slightly, so a release is judged on real margin), without shifting the
-  //       local sim's own trajectory far enough to change bonk/arc timing;
-  //     * hold the x/z correction off for a full rtt + one tick after any real
-  //       input change — exactly the time for that input to go up, be applied on
-  //       the next tick, and come back, so the correction never resumes against
-  //       a sample that still carries the *previous* input's velocity.
-  //  - airborne arc ownership: in the air the whole pull is ×0.2 and vy is left
-  //    to gravity (the local sim is the solo player mid-flight).
-  // Weight decays exp(-age/0.3) as the sample goes stale; instant snap only for
-  // true discontinuities (fall/respawn, phase change, |err| > 8u) — those are
-  // events, not drift, and no confirmation window covers them.
+  // me: reconcile against the server. The comparison happens once per sample in
+  // reconcileOwn(); here we only ease the resulting correction in (or hard-snap on
+  // true discontinuities: fall/respawn, phase change, |err| > 8 u).
   if (netMine) {
     const p = S.players[me];
     if (!p) return remotes;
-    const age = Math.max(0, S.t - netMine.t);
-    const rtt = clamp(netStats.rtt >= 0 ? netStats.rtt / 1000 : 2 / 30, 2 / 30, 1.2);  // full round trip, s
-    const uplink = rtt / 2;
-    // Vertical gate: original sample-age window (uplink) — jump-arc protection.
-    const wInpY = clamp((S.t - lastInpAt - uplink) / 0.1, 0, 1);  // 100 ms ramp: no weight pop on re-entry
-    const wY = Math.exp(-age / 0.3) * wInpY;
-    // Horizontal gate: hold off for a full RTT + one tick after an input change.
-    const wInpXZ = clamp((S.t - lastInpAt - (rtt + 1 / 30)) / 0.1, 0, 1);
-    const wXZ = Math.exp(-age / 0.3) * wInpXZ;
-    const lookAhead = Math.min(rtt * LOOKAHEAD, LOOKAHEAD_MAX);  // cap so high-RTT lines don't lead by several units
-    const tx = netMine.x + netMine.vx * (age + lookAhead);  // x: look ahead past the stale sample
-    const tz = netMine.z + netMine.vz * (age + lookAhead);  // z: look ahead past the stale sample
-    const ty = netMine.y + netMine.vy * age - (netMine.ground < 0 ? 0.5 * Sim.K.GRAV * age * age : 0);
-    const ex = tx - p.x, ey = ty - p.y, ez = tz - p.z;
-    netStats.corr = Math.hypot(ex, ey, ez);
-    if (needHardSnapMe || ex * ex + ey * ey + ez * ez > 64) {  // fall/respawn, phase change, or |err| > 8u
-      p.x = netMine.x; p.y = netMine.y; p.z = netMine.z; p.yaw = netMine.yaw;
-      p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
-      p.ground = netMine.ground >= 0 ? S.solids[netMine.ground] : null;
-      needHardSnapMe = false; netStats.snaps++;
-    } else {
-      // In the air the local sim owns the arc: the server's version of it is
-      // (uplink + tick) late, and pulling the flight onto it reads as a muted,
-      // slightly delayed jump. A small residual keeps the arc from wandering;
-      // on landing the full grounded correction closes the ~0.2 u offset in
-      // ~0.2 s — far under the 8 u snap guard, so it reads as nothing.
-      const airW = p.ground ? 1 : 0.2;
-      // Horizontal ease uses the RTT-gated weight; vertical keeps the sample-age
-      // gate so the jump arc stays locally owned.
-      const fXZ = (1 - Math.exp(-10 * dt)) * wXZ * airW;
-      const fY = (1 - Math.exp(-10 * dt)) * wY * airW;
-      p.x += ex * fXZ; p.z += ez * fXZ;
-      p.y += ey * fY;
-      p.yaw += wrapA(netMine.yaw - p.yaw) * fXZ;
-      // ease velocity toward the server's too, so the position correction isn't
-      // immediately undone by a stale local velocity (and there's no velocity pop)
-      const fvXZ = (1 - Math.exp(-6 * dt)) * wXZ * airW;
-      const fvY = (1 - Math.exp(-6 * dt)) * wY * airW;
-      p.vx += (netMine.vx - p.vx) * fvXZ;
-      p.vz += (netMine.vz - p.vz) * fvXZ;
-      if (p.ground) p.vy += (netMine.vy - p.vy) * fvY;  // in the air, gravity owns vy
-    }
+    applyOwnCorrection(p, dt);
   }
   return remotes;
 }
@@ -1923,6 +1914,13 @@ function update(dt, t) {
       let n = 0;
       while (simAcc >= SIM_STEP && n < 10) { sim.step(SIM_STEP, input); simAcc -= SIM_STEP; n++; }
       if (n >= 10) simAcc = 0;  // drop backlog instead of spiral-of-death
+      // where we predict ourselves to be, on the wall clock; reconcileOwn() compares server samples with this
+      const pm = sim.players[me];
+      if (pm) {
+        const w = t + dt;  // state after this frame's step reflects the input sent at its start
+        ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground });
+        while (ownHist.length && ownHist[0].w < w - 2.5) ownHist.shift();
+      }
       // re-apply the remote interpolation after the local step: neutral-input physics
       // would bleed their velocity and drift their position off the network truth
       for (let i = 0; i < remotes.length; i++) {
@@ -2258,6 +2256,7 @@ if (isMP) {
           if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }  // fall/respawn
           // position correction happens in applyNet(); keep the last server sample as target
           netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };
+          reconcileOwn(s, sp, now / 1000);
         }
         // remotes: pos/vel/yaw are set by applyNet() from the interpolation buffer
       }

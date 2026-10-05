@@ -284,7 +284,38 @@ class Room {
     // apply per-player inputs
     for (const c of this.clients.values()) {
       const p = this.sim.players[c.simPlayerId];
-      if (p && !p.bot) p._mpInput = c.input;
+      if (p && !p.bot) {
+        if (c.inputQueue && c.inputQueue.length > 0) {
+          // If queue was empty, lock the playhead to the first packet's timestamp so it 
+          // plays immediately. Subsequent packets in a clump will be spaced out by dt!
+          if (c.playheadT == null) c.playheadT = c.inputQueue[0].t;
+          
+          c.playheadT += dt;
+          
+          let mx = c.input.mx, mz = c.input.mz, fire = c.input.fire;
+          let jump = false, dive = false;
+          
+          while (c.inputQueue.length > 0) {
+            const head = c.inputQueue[0];
+            if (head.t <= c.playheadT) {
+              mx = head.mx !== undefined ? head.mx : mx;
+              mz = head.mz !== undefined ? head.mz : mz;
+              fire = head.fire !== undefined ? head.fire : fire;
+              if (head.jump) jump = true;
+              if (head.dive) dive = true;
+              c.inputQueue.shift();
+            } else {
+              break;
+            }
+          }
+          c.input = { mx, mz, fire, jump: false, dive: false }; // Save continuous state
+          p._mpInput = { mx, mz, fire, jump, dive };
+        } else {
+          // Buffer empty: hold the last continuous input
+          c.playheadT = null;
+          p._mpInput = { mx: c.input.mx, mz: c.input.mz, fire: c.input.fire, jump: !!c.input.jump, dive: !!c.input.dive };
+        }
+      }
     }
 
     // we call S.step with null human input since we handle per-player input via _mpInput in sim.js
@@ -404,13 +435,18 @@ class Room {
     const p = this.sim && this.sim.players[c.simPlayerId];
     if (!p || p.bot) return;
 
-    // update continuous input
-    c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
-    c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
-    // one-shot flags accumulate until consumed
-    if (input.jump) c.input.jump = true;
-    if (input.dive) c.input.dive = true;
-    c.input.fire = !!input.fire;
+    if (!c.inputQueue) c.inputQueue = [];
+    // Only queue if it has a timestamp from the client. Fallback to immediate apply if missing.
+    if (typeof input.t === 'number') {
+      c.inputQueue.push(input);
+    } else {
+      // Legacy un-timestamped behavior
+      c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
+      c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
+      if (input.jump) c.input.jump = true;
+      if (input.dive) c.input.dive = true;
+      c.input.fire = !!input.fire;
+    }
   }
 }
 
