@@ -136,7 +136,8 @@ solo.players[0].ammo = 3;
 // server history for interpolation at the client's render time
 const hist = { t: [], p: [[], [], []] };
 // mirrors mp-server.js broadcastState() exactly (compact fixed-point wire format)
-function snapNow() {
+// ackMs: client-stamp time (ms) of the newest input the server applied to Me this tick
+function snapNow(ackMs) {
   const S = srv;
   const q2 = v => Math.round(v * 100), q1 = v => Math.round(v * 10);
   return {
@@ -150,6 +151,7 @@ function snapNow() {
       q2(p.stun), q2(p.diveT), q2(p.dead), q2(p.protect),
       p.ammo, p.cp, p.finished ? 1 : 0, p.finished ? q2(p.finishT) : 0,
       p.place, p.falls, p.bonks,
+      p === S.players[ME] ? ackMs : 0,
     ]),
     tl: S.solids.filter(s => s.kind === 'crumble').map(s => [s.id, s.state, q2(s.cy), s.active ? 1 : 0]),
     bl: S.bullets.map(b => [b.id, q2(b.x), q2(b.y), q2(b.z), q1(b.vx), q1(b.vz), b.owner]),
@@ -210,7 +212,7 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   srv.step(TICK, null);
   for (let i = 0; i < 3; i++) hist.p[i].push({ x: srv.players[i].x, y: srv.players[i].y, z: srv.players[i].z, vz: srv.players[i].vz });
   hist.t.push(srv.t);
-  outQ.push({ at: tick + DELIVERY, snap: snapNow() });  // 30 Hz state stream, like the shipped server
+  outQ.push({ at: tick + DELIVERY, snap: snapNow(tick >= 2 ? Math.round((tick - 1) * TICK * 1000) : 0) });  // 30 Hz state stream, like the shipped server
 
   // client frame: deliver everything that has arrived (DELIVERY-tick one-way)
   while (outQ.length && outQ[0].at <= tick) api.onState(outQ.shift().snap);
@@ -223,7 +225,7 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   myInputDelay.push(tick === 95 ? { ...mine, fire: false } : mine);
 
   // the shipped update() order: input out, then applyNet, then the local step
-  api.sendMPInput(mine);
+  api.sendMPInput(mine, vNowMs / 1000);
   const remotes = api.applyNet(TICK);
   simAcc += TICK;
   let n = 0;
@@ -234,9 +236,9 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   // Update ownHist for reconciliation
   const pm = cl.players[ME];
   if (pm) {
-    const w = vNowMs / 1000 + TICK;
-    api.ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground });
-    while (api.ownHist.length && api.ownHist[0].w < w - 2.5) api.ownHist.shift();
+    const w = vNowMs / 1000;  // labelled by the stamp of the input that produced this state
+    api.ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground, vx: pm.vx, vz: pm.vz });
+    while (api.ownHist.length && api.ownHist[0].w < w - 6) api.ownHist.shift();
   }
   // solo reference: identical sim, only Me, same input, no netcode
   soloAcc += TICK;

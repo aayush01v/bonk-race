@@ -1585,7 +1585,11 @@ const EXTRAP_MAX = 0.2;   // cap on how far a starved sample is extrapolated
 // the MATCHING moment instead of with where we are now.
 const ownHist = [];                    // { w, x, y, z, g }: predicted pos at client wall time w (s)
 const ownPend = { x: 0, y: 0, z: 0 };  // correction still to be eased in
+const ownPendV = { x: 0, z: 0 };       // velocity correction still to be eased in
 const OWN_DZ = 0.35;                   // u: residual below this is alignment noise — ignored
+const OWN_DV = 2.5;                    // u/s: velocity residual below this is alignment noise (one tick of accel/decel is ~2 u/s)
+const ACK_LEAD = 1 / 60;               // s: the server integrates one tick after applying an input; ownHist is labelled by input stamp
+const OWN_HIST_S = 6;                  // s of predicted history kept: must exceed the worst loop delay (RTT + playout buffer)
 const BUF_AGE = 1.0;      // snapshots older than (now - BUF_AGE) are dropped (time, not count)
 let interpDelay = INTERP_DELAY;   // the smoothed delay actually used to render
 let interpTarget = INTERP_DELAY;  // where interpDelay is easing toward
@@ -1619,6 +1623,7 @@ function decodeState(m) {
       stun: a[8] / 100, diveT: a[9] / 100, dead: a[10] / 100, protect: a[11] / 100,
       ammo: a[12], cp: a[13], finished: a[14] > 0, finishT: a[15] / 100,
       place: a[16], falls: a[17], bonks: a[18],
+      ack: a[19] > 0 ? a[19] / 1000 : 0,  // client-stamp time (s) this sample reflects; 0 = not acked
     })),
     tiles: m.tl.map(a => ({ id: a[0], state: a[1], cy: a[2] / 100, active: a[3] > 0 })),
     bullets: m.bl.map(a => ({ id: a[0], x: a[1] / 100, y: a[2] / 100, z: a[3] / 100, vx: a[4] / 10, vz: a[5] / 10, owner: a[6] })),
@@ -1636,7 +1641,7 @@ function resetNet() {
   // RTT state must not leak across rematches, and the probe should re-fire
   // promptly after a fresh race (lastPing = 0 → the 1 Hz gate is open)
   rttEst = -1; netStats.rtt = -1; netStats.lastPing = 0;
-  ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0;
+  ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0; ownPendV.x = ownPendV.z = 0;
 }
 
 // Feed one RTT sample (ms) into the estimate. A single raw ping is too noisy to
@@ -1689,7 +1694,7 @@ function flushNetEvents() {
 }
 
 // send input only on change (+ one-shot pulses, + 100ms keep-alive) — not every frame
-function sendMPInput(input) {
+function sendMPInput(input, stampT) {
   if (!mpHost) return;
   const now = performance.now();
   const l = lastSentInp;
@@ -1698,7 +1703,9 @@ function sendMPInput(input) {
     // re-arm the confirmation window only for real new inputs; the 100 ms
     // keep-alive resend carries no new information for the server
     if (changed || input.jump || input.dive) lastInpAt = sim.t;
-    input.t = sim.t; // add timestamp for server-side jitter buffering
+    // monotonic wall-clock stamp (NOT sim.t: that clock is slewed toward the server's and
+    // would distort input durations on the server's playout buffer)
+    input.t = stampT;
     mpHost.postMessage({ type: 'mp_input', input }, '*');
     lastSentInp = { mx: input.mx, mz: input.mz, fire: input.fire };
     lastSentAt = now;
@@ -1737,17 +1744,25 @@ function lerpPair() {
 // the history and the sample are grounded (the local sim owns jump arcs).
 function reconcileOwn(s, sp, tArr) {
   if (needHardSnapMe || !ownHist.length) return;
-  const rtt = netStats.rtt >= 0 ? netStats.rtt / 1000 : 0.1;
-  // production time on the client clock plus the mean downlink, from the server
-  // timestamp, so downlink jitter doesn't leak into the alignment (arrival as fallback)
-  const base = srvOffset !== null ? s.t - srvOffset : tArr;
-  const tm = base - rtt / 2;  // The server sample sp incorporates inputs up to base - uplink, so it matches client at base - uplink!
+  let tm;
+  if (sp.ack > 0) {
+    // exact: the server says which of our (monotonic-stamped) inputs this sample contains
+    tm = sp.ack + ACK_LEAD;
+  } else {
+    // old server without acks: estimate the loop delay. `base` is arrival-based (srvOffset
+    // is learned from arrival times), so it already includes the downlink; the inputs the
+    // sample reflects were sent a FULL round trip before it arrived — not rtt/2.
+    const rtt = netStats.rtt >= 0 ? netStats.rtt / 1000 : 0.1;
+    const base = srvOffset !== null ? s.t - srvOffset : tArr;
+    tm = base - rtt;
+  }
   let h = null;
   for (let i = ownHist.length - 1; i >= 1; i--) {
     const a = ownHist[i - 1], b = ownHist[i];
     if (a.w <= tm && tm <= b.w) {
       const k = b.w > a.w ? (tm - a.w) / (b.w - a.w) : 1;
-      h = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: a.z + (b.z - a.z) * k, g: a.g && b.g };
+      h = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: a.z + (b.z - a.z) * k, g: a.g && b.g,
+            vx: a.vx + (b.vx - a.vx) * k, vz: a.vz + (b.vz - a.vz) * k };
       break;
     }
   }
@@ -1765,6 +1780,15 @@ function reconcileOwn(s, sp, tArr) {
     ownPend.y += py;
     for (const e of ownHist) e.y += py;
   }
+  // velocity: same alignment, so a difference is a real divergence the server decided
+  // (a bonk/knockback the local sim predicted differently or not at all). Only the excess
+  // over OWN_DV is adopted, never the raw stale sample velocity.
+  const dvx = sp.vx - h.vx, dvz = sp.vz - h.vz, dm = Math.hypot(dvx, dvz);
+  if (dm > OWN_DV) {
+    const k = (dm - OWN_DV) / dm, qx = dvx * k, qz = dvz * k;
+    ownPendV.x += qx; ownPendV.z += qz;
+    for (const e of ownHist) if (e.w > tm) { e.vx += qx; e.vz += qz; }
+  }
 }
 
 function applyOwnCorrection(p, dt) {
@@ -1773,12 +1797,15 @@ function applyOwnCorrection(p, dt) {
     p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
     p.ground = netMine.ground >= 0 ? sim.solids[netMine.ground] : null;
     needHardSnapMe = false; netStats.snaps++;
-    ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0;
+    ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0; ownPendV.x = ownPendV.z = 0;
   } else {
     const f = 1 - Math.exp(-12 * dt);
     const dx = ownPend.x * f, dy = ownPend.y * f, dz = ownPend.z * f;
     p.x += dx; p.y += dy; p.z += dz;
     ownPend.x -= dx; ownPend.y -= dy; ownPend.z -= dz;
+    const dvx = ownPendV.x * f, dvz = ownPendV.z * f;
+    p.vx += dvx; p.vz += dvz;
+    ownPendV.x -= dvx; ownPendV.z -= dvz;
   }
   netStats.corr = Math.hypot(ownPend.x, ownPend.y, ownPend.z);
 }
@@ -1907,7 +1934,8 @@ function update(dt, t) {
   if (!paused) {
     const input = playing ? readInput() : null;
     if (isMP) {
-      if (playing) sendMPInput(input);
+      const stampT = performance.now() / 1000;  // this frame's input stamp (monotonic)
+      if (playing) sendMPInput(input, stampT);
       const remotes = applyNet(dt);
       // fixed 1/60 steps so the local sim's sub-step size matches the server's
       simAcc += dt;
@@ -1917,9 +1945,9 @@ function update(dt, t) {
       // where we predict ourselves to be, on the wall clock; reconcileOwn() compares server samples with this
       const pm = sim.players[me];
       if (pm) {
-        const w = t + dt;  // state after this frame's step reflects the input sent at its start
-        ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground });
-        while (ownHist.length && ownHist[0].w < w - 2.5) ownHist.shift();
+        // labelled by the stamp of the input that produced it (what the server acks)
+        ownHist.push({ w: stampT, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground, vx: pm.vx, vz: pm.vz });
+        while (ownHist.length && ownHist[0].w < stampT - OWN_HIST_S) ownHist.shift();
       }
       // re-apply the remote interpolation after the local step: neutral-input physics
       // would bleed their velocity and drift their position off the network truth
@@ -2255,7 +2283,7 @@ if (isMP) {
           const dead = sp.dead > 0;
           if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }  // fall/respawn
           // position correction happens in applyNet(); keep the last server sample as target
-          netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };
+          netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };  // (reconcileOwn reads sp.ack)
           reconcileOwn(s, sp, now / 1000);
         }
         // remotes: pos/vel/yaw are set by applyNet() from the interpolation buffer

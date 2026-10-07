@@ -157,6 +157,49 @@ Remaining: manual playtest matrix (4.2) and the optional revert flag (4.3).
     (cap 0.12 s) keeps the arc, keeps on-screen within a fraction of an RTT of
     the server sample, and still recovers the release margin.
 
+## Phase 7: Acked inputs + aligned reconciliation (release/edge fix, round 2)
+
+Phase 5 still dropped players off edges on slow lines. Root causes, found by replaying the real
+client code against a 30 Hz server over a simulated link (`test_mp_pipeline.js`):
+
+- **`rtt/2` alignment.** `reconcileOwn` compared a sample with the local history at `base - rtt/2`.
+  `srvOffset` is learned from *arrival* times, so `base` already contains the downlink; the inputs a
+  sample reflects were sent a full round trip before it arrived. `rtt/2` leaves a phantom error of
+  about `v * rtt/2`, which the correction drags the player toward (stop, then lurch forward).
+- **`input.t = sim.t`.** `sim.t` is slewed toward the server clock in `applyNet`, so differences
+  between stamps do not equal elapsed time; the server then replays inputs with distorted durations.
+- **The server's first timestamped queue** had a playhead that locked to the first packet, applied
+  inputs in arrival order (head-of-line blocking on a stamp jump), never caught up after a burst, and
+  had no queue cap or validation. It also added lag the client could not observe, so any
+  RTT-based alignment was wrong by that backlog.
+
+Protocol now:
+
+1. Inputs are stamped with the client's monotonic clock (`performance.now()/1000`), once per frame.
+2. `bonk/inputbuf.js` (`InputBuffer`, one per client in `mp-server.js`) maps stamps to server time
+   with a relaxing-minimum offset filter and plays each input out at `stamp + offset + buf`, where
+   `buf` (40–300 ms) adapts to the observed jitter. Durations are reproduced; the queue is sorted,
+   capped (120) and validated; un-stamped (legacy) clients still use last-input-wins.
+3. Each snapshot row for a human carries `ack` (ms, index 19): the client-stamp time up to which that
+   client's inputs are included in the row (0 = none: bots / legacy).
+4. The client labels its predicted history by the same stamps and compares each own-player sample
+   with the prediction **at `ack`**. Only the part of the position error beyond `OWN_DZ` (0.35 u) and
+   of the velocity error beyond `OWN_DV` (2.5 u/s) is eased in; the same offset is added to the
+   history so it is not counted twice. y is only reconciled while grounded. Hard snaps (death/respawn,
+   phase change, |err| > 8 u) are unchanged. Without an ack (old server) the loop delay is estimated
+   as a full RTT (never `rtt/2`).
+
+Verification: `node test_mp_pipeline.js` (edge release, no post-stop lurch, real divergence still
+absorbed, jump arcs local, steering on the solo prediction; RTT 200 ms–2 s, ±150 ms jitter,
+asymmetric links), `node test_mp_ack_e2e.js` (real server over WebSockets; needs `ws`), plus the
+older suites, whose own-player references were moved off "the server position at now" (that
+reference rewards sitting on a stale sample, i.e. the bug).
+
+Known limits: jitter beyond the 300 ms playout cap (e.g. ±200 ms each way at 600 ms RTT) can still
+produce some server-side falls; the local sim predicts remote-caused bonks from stale samples, so on
+very slow lines the screen is off until the server's authoritative result lands; after "go" the
+server's body leads the client's by the one-way phase delay and the screen aligns to it once.
+
 ## Phase 6: Frontend robustness (audit round, 2026-10-05)
 
 - [x] **6.1 — Smoothed RTT estimate** (`updateRtt()`, pong handler)

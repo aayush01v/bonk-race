@@ -14,8 +14,13 @@
 // one uplink later (DELIVERY ticks), exactly like the real line.
 //
 // Assertions (verified against the SOLO reference, not just the server/corr):
-//   1. on-screen tracks the solo sim horizontally (max |Δz| small) — no slide
-//   2. releasing with MARGIN of room does NOT throw Me off the edge (no fall)
+//   1. on-screen does not DRIFT from the solo prediction while cruising (the spread of
+//      screen-minus-solo stays small). A constant offset is allowed: after "go" the
+//      server's body leads the client's by the one-way phase delay and the ack-based
+//      reconciliation aligns the screen to that authoritative trajectory once.
+//   2. the screen and the authoritative server stop at the same place (|Δ| small) —
+//      the "I stopped but the server didn't" mismatch behind the boom-respawn
+//   3. releasing with MARGIN of room does NOT throw Me off the edge (no fall)
 // The test FAILS on the pre-fix code (Me falls / slides) and PASSES on the fix.
 const fs = require('fs');
 const path = require('path');
@@ -138,7 +143,8 @@ flatten(solo);
 solo.players[0].ammo = 3;
 
 // compact wire format, mirrors mp-server.js broadcastState()
-function snapNow() {
+// ackMs: the client-stamp time (ms) of the newest input the server applied to Me this tick
+function snapNow(ackMs) {
   const S = srv;
   const q2 = v => Math.round(v * 100), q1 = v => Math.round(v * 10);
   return {
@@ -152,6 +158,7 @@ function snapNow() {
       q2(p.stun), q2(p.diveT), q2(p.dead), q2(p.protect),
       p.ammo, p.cp, p.finished ? 1 : 0, p.finished ? q2(p.finishT) : 0,
       p.place, p.falls, p.bonks,
+      p === S.players[ME] ? ackMs : 0,
     ]),
     tl: S.solids.filter(s => s.kind === 'crumble').map(s => [s.id, s.state, q2(s.cy), s.active ? 1 : 0]),
     bl: S.bullets.map(b => [b.id, q2(b.x), q2(b.y), q2(b.z), q1(b.vx), q1(b.vz), b.owner]),
@@ -194,11 +201,11 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   srv.players[1]._mpInput = NEUTRAL;
   srv.step(TICK, null);
 
-  outQ.push({ at: tick + DELIVERY, snap: snapNow() });
+  outQ.push({ at: tick + DELIVERY, snap: snapNow(tick - DELIVERY >= 1 ? Math.round((tick - DELIVERY) * TICK * 1000) : 0) });
 
   // client: deliver everything that has arrived, then shipped update() order
   while (outQ.length && outQ[0].at <= tick) api.onState(outQ.shift().snap);
-  api.sendMPInput(mine);
+  api.sendMPInput(mine, vNowMs / 1000);
   api.applyNet(TICK);
   simAcc += TICK;
   let n = 0;
@@ -207,9 +214,9 @@ for (let tick = 1; tick <= N_TICKS; tick++) {
   
   const pm = cl.players[ME];
   if (pm) {
-    const w = vNowMs / 1000 + TICK;
-    api.ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground });
-    while (api.ownHist.length && api.ownHist[0].w < w - 2.5) api.ownHist.shift();
+    const w = vNowMs / 1000;  // labelled by the stamp of the input that produced this state
+    api.ownHist.push({ w, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground, vx: pm.vx, vz: pm.vz });
+    while (api.ownHist.length && api.ownHist[0].w < w - 6) api.ownHist.shift();
   }
 
   // solo reference: identical sim, only Me, same input, no netcode
@@ -261,7 +268,13 @@ console.log(`  on-screen vs solo, overall (incl. post-release reconciliation to 
 }
 
 ok(releaseTick > 0, `the player actually released before reaching the edge (tick ${releaseTick})`);
-ok(approachErr < 0.4, `on-screen tracks the solo prediction through the approach — the release-decision window (max |Δz| ${approachErr.toFixed(2)} u; pre-fix the on-screen trailed the pure prediction by ~v·rtt here, so the player released with less true margin than they saw)`);
+// 1. drift of (screen - solo) over the cruising window, excluding the race-start alignment
+const cruise = gapLog.slice(120, (releaseTick > 0 ? releaseTick : N_TICKS) + 1).filter(isFinite);
+const gapSpread = cruise.length ? Math.max(...cruise) - Math.min(...cruise) : Infinity;
+ok(gapSpread < 0.25, `on-screen does not drift from the solo prediction while cruising (spread of screen-minus-solo ${gapSpread.toFixed(2)} u; offset ${cruise.length ? cruise[cruise.length - 1].toFixed(2) : 'n/a'} u is the one-time race-start alignment; the old stale-sample pull made the gap grow to ~v·rtt)`);
+// 2. screen vs authoritative server at rest
+const stopDelta = Math.abs(clStopZ - srvStopZ);
+ok(stopDelta < 0.25, `screen and server stop at the same place (|Δ| ${stopDelta.toFixed(2)} u)`);
 ok(!srvFell, `releasing ${MARGIN} u short of the edge survives on the authoritative server (${srvFell ? 'server fell — the stale-sample pull threw the player over the edge' : 'server made the landing'})`);
 ok(!clFell, `the on-screen player survives too (${clFell ? 'on-screen fell' : 'on-screen landed'})`);
 

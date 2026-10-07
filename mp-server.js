@@ -31,6 +31,9 @@ try {
 
 /* ─── load sim.js ─── */
 const Sim = require('./bonk/sim.js');
+const { InputBuffer } = require('./bonk/inputbuf.js');
+const { performance } = require('perf_hooks');
+const nowS = () => performance.now() / 1000;   // monotonic server clock (s); inputs are mapped onto it by InputBuffer
 
 /* ─── config ─── */
 const PORT = parseInt(process.env.PORT || '8000', 10);
@@ -101,7 +104,8 @@ class Room {
   /* ── client management ── */
   addClient(client) {
     client.roomCode = this.code;
-    client.input = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
+    client.input = { mx: 0, mz: 0, jump: false, dive: false, fire: false };  // legacy path (un-stamped clients)
+    client.ib = new InputBuffer();
     client.simPlayerId = -1;
     this.clients.set(client.playerId, client);
     this.broadcastLobby();
@@ -210,6 +214,8 @@ class Room {
     for (const c of this.clients.values()) {
       const p = this.sim.addPlayer({ name: c.name, bot: false, kind: c.kind || 'zombie', skill: 0 });
       c.simPlayerId = p.id;
+      c.ib.reset();
+      c.input = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
       slot++;
     }
 
@@ -285,36 +291,11 @@ class Room {
     for (const c of this.clients.values()) {
       const p = this.sim.players[c.simPlayerId];
       if (p && !p.bot) {
-        if (c.inputQueue && c.inputQueue.length > 0) {
-          // If queue was empty, lock the playhead to the first packet's timestamp so it 
-          // plays immediately. Subsequent packets in a clump will be spaced out by dt!
-          if (c.playheadT == null) c.playheadT = c.inputQueue[0].t;
-          
-          c.playheadT += dt;
-          
-          let mx = c.input.mx, mz = c.input.mz, fire = c.input.fire;
-          let jump = false, dive = false;
-          
-          while (c.inputQueue.length > 0) {
-            const head = c.inputQueue[0];
-            if (head.t <= c.playheadT) {
-              mx = head.mx !== undefined ? head.mx : mx;
-              mz = head.mz !== undefined ? head.mz : mz;
-              fire = head.fire !== undefined ? head.fire : fire;
-              if (head.jump) jump = true;
-              if (head.dive) dive = true;
-              c.inputQueue.shift();
-            } else {
-              break;
-            }
-          }
-          c.input = { mx, mz, fire, jump: false, dive: false }; // Save continuous state
-          p._mpInput = { mx, mz, fire, jump, dive };
-        } else {
-          // Buffer empty: hold the last continuous input
-          c.playheadT = null;
-          p._mpInput = { mx: c.input.mx, mz: c.input.mz, fire: c.input.fire, jump: !!c.input.jump, dive: !!c.input.dive };
-        }
+        // stamped clients: InputBuffer replays their inputs with the client's own timing
+        // (jitter-absorbed) and records the ack stored into the snapshot; un-stamped
+        // (legacy) clients: last input wins, as before
+        const inp = c.ib.step(nowS());
+        p._mpInput = inp || c.input;
       }
     }
 
@@ -378,7 +359,9 @@ class Room {
    *   pl[i]    index = player id:
    *            [x,y,z ×100, vx,vy,vz ×10, yaw ×100, ground,
    *             stun,diveT,dead,protect ×100, ammo, cp, finished(0/1),
-   *             finishT ×100, place, falls, bonks]
+   *             finishT ×100, place, falls, bonks,
+   *             ack ms: the client-stamp time (its monotonic clock) up to which this
+   *             human's inputs are included in the row; 0 = none (bots / legacy clients)]
    *   tl[i]    crumble solid: [id, state, cy ×100, active(0/1)]
    *   bl[i]    bullet: [id, x,y,z ×100, vx,vz ×10, owner]
    *   pk[i]    pickup on (0/1)
@@ -386,6 +369,8 @@ class Room {
   broadcastState() {
     if (!this.sim) return;
     const S = this.sim;
+    const acks = new Map();
+    for (const c of this.clients.values()) if (c.ib && c.ib.active) acks.set(c.simPlayerId, Math.round(c.ib.ack * 1000));
     const pl = [];
     for (const p of S.players) pl.push([
       r100(p.x), r100(p.y), r100(p.z), r10(p.vx), r10(p.vy), r10(p.vz), r100(p.yaw),
@@ -393,6 +378,7 @@ class Room {
       r100(p.stun), r100(p.diveT), r100(p.dead), r100(p.protect),
       p.ammo, p.cp, p.finished ? 1 : 0, p.finished ? r100(p.finishT) : 0,
       p.place, p.falls, p.bonks,
+      acks.get(p.id) || 0,
     ]);
     const tl = [];
     for (const s of S.solids) if (s.kind === 'crumble')
@@ -435,18 +421,14 @@ class Room {
     const p = this.sim && this.sim.players[c.simPlayerId];
     if (!p || p.bot) return;
 
-    if (!c.inputQueue) c.inputQueue = [];
-    // Only queue if it has a timestamp from the client. Fallback to immediate apply if missing.
-    if (typeof input.t === 'number') {
-      c.inputQueue.push(input);
-    } else {
-      // Legacy un-timestamped behavior
-      c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
-      c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
-      if (input.jump) c.input.jump = true;
-      if (input.dive) c.input.dive = true;
-      c.input.fire = !!input.fire;
-    }
+    // stamped input (t = the client's monotonic clock, s): buffered + validated by InputBuffer
+    if (c.ib.push(input, nowS())) return;
+    // legacy un-stamped client: apply immediately (last input wins)
+    c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
+    c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
+    if (input.jump) c.input.jump = true;
+    if (input.dive) c.input.dive = true;
+    c.input.fire = !!input.fire;
   }
 }
 
@@ -510,6 +492,7 @@ wss.on('connection', (ws) => {
     kind: 'zombie',
     roomCode: null,
     input: { mx: 0, mz: 0, jump: false, dive: false, fire: false },
+    ib: new InputBuffer(),
     simPlayerId: -1,
   };
 
