@@ -172,6 +172,25 @@ platforms, crumbling tiles, pistons, a bounce-pad gap, a spinning disc, a final
 spinner, seven checkpoints, and six ammo pickups. Combat is knockback-only;
 falling respawns the player at the last checkpoint.
 
+## Multiplayer latency
+
+The shipped multiplayer client is the root `sim-race-webgl.html`. Its clock is
+aligned to snapshot arrival, so it already includes downlink transit. Remote
+interpolation adds a 150 ms safety buffer plus half the measured arrival-gap
+jitter, capped at 400 ms; it does not add RTT/2 again. RTT remains available
+for diagnostics and legacy reconciliation.
+
+The deterministic slow-line test (167 ms base one-way delay, up to 67 ms
+additional jitter, 5% snapshot loss) settles near 180 ms of extra buffering,
+down from 380 ms, with no moving-player starvation freezes. This improves
+rendering latency, not network ping. Real-device multiplayer playtesting is
+still needed.
+
+The shared `bonk/client/game.js` and its generated `dist` files currently
+contain an older multiplayer implementation. Rebuilding them does not update
+the specialized root multiplayer client; do not overwrite that client with
+the generated WebGL file.
+
 ## Verification status
 
 The current automated baseline passes:
@@ -190,3 +209,4 @@ low-end/mobile performance need a browser/device pass.
 ## License
 
 MIT
+

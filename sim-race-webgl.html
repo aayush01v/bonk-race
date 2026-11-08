@@ -1576,8 +1576,8 @@ function onEvent(e) {
    server. Fixed 1/60 sub-steps match the server's h. See README §10. */
 const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60;
 // Adaptive interpolation delay: instead of a fixed 100 ms, the render delay
-// eases toward a target that tracks one-way latency + arrival jitter, so slow,
-// lossy or jittery connections get more buffer (fewer starvation freezes).
+// eases toward a target that tracks arrival jitter. The arrival-aligned
+// sim clock already includes downlink transit; adding RTT/2 here counts it twice.
 const INTERP_MIN = 0.1, INTERP_MAX = 0.4, INTERP_BASE = 0.15;
 const EXTRAP_MAX = 0.2;   // cap on how far a starved sample is extrapolated
 // Own-player reconciliation state (see reconcileOwn()). A short history of where WE
@@ -1662,12 +1662,13 @@ function updateRtt(sampleMs) {
   netStats.rtt = rttEst;
 }
 
-// Refresh the adaptive-delay target from the current RTT + arrival-gap jitter.
-// Called on each state arrival. One-way latency ≈ rtt/2; jitter is how late the
+// Refresh the adaptive-delay target from arrival-gap jitter, not RTT.
+// srvOffset is measured at arrival, so sim.t already trails the server by
+// downlink transit. Only extra buffering for uneven arrivals is needed here.
+// Called on each state arrival. Jitter is how late the
 // worst recent packet was (p95 arrival gap minus the mean, over the ~60-sample
 // window already collected for the ?net=1 overlay).
 function updateDelayTarget() {
-  const oneWay = netStats.rtt >= 0 ? netStats.rtt / 2000 : 0;
   let jitter = 0;
   if (netStats.gaps.length > 4) {
     const g = netStats.gaps.slice().sort((a, b) => a - b);
@@ -1675,7 +1676,7 @@ function updateDelayTarget() {
     const mean = g.reduce((a, b) => a + b, 0) / g.length;
     jitter = Math.max(0, p95 - mean) / 1000;
   }
-  interpTarget = clamp(INTERP_BASE + oneWay + jitter * 0.5, INTERP_MIN, INTERP_MAX);
+  interpTarget = clamp(INTERP_BASE + jitter * 0.5, INTERP_MIN, INTERP_MAX);
 }
 
 // Release queued remote fire/jump/dive VFX whose render time has arrived, so the
@@ -2323,3 +2324,4 @@ window.__race = { get sim() { return sim; }, get mode() { return mode; }, get me
 </script>
 </body>
 </html>
+

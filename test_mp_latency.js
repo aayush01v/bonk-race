@@ -4,8 +4,9 @@
 // unmodified — against a real authoritative 30 Hz sim (bonk/sim.js) behind a
 // configurable delivery pipe: one-way delay + jitter + snapshot drop. The RTT
 // probe is simulated by feeding netStats.rtt, so the adaptive-delay target sees
-// the real one-way latency + arrival jitter. Each scenario asserts a mix of:
-//   - adaptive delay converges to cover the line (and shrinks on a good line)
+// measured RTT; buffering must depend on jitter, not count transit twice.
+// Each scenario asserts a mix of:
+//   - adaptive delay covers jitter without adding the transit time again
 //   - remote frame-to-frame motion stays smooth (no freeze-jump, no explosion)
 //   - own-player correction stays bounded
 //   - the snapshot stream stays well paced (median gap + delivery ratio)
@@ -304,6 +305,25 @@ const mean = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0;
 const median = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
 const arrGapsOf = t => { const g = []; for (let i = 1; i < t.length; i++) g.push(t[i] - t[i - 1]); return g; };
 
+// Stable latency must shift the arrival-aligned clock, not increase the buffer.
+// Exercise the shipped target function directly so reintroducing RTT/2 fails.
+{
+  const factory = new Function('TAU', 'Sim', 'clamp', 'sim', 'performance',
+    netBlock + '\nreturn { netStats, updateDelayTarget, get target() { return interpTarget; } };');
+  const api = factory(Math.PI * 2, Sim, clamp, {}, { now: () => 0 });
+  api.netStats.gaps.push(...Array(60).fill(1000 / 30));
+  api.netStats.rtt = 20;
+  api.updateDelayTarget();
+  const low = api.target;
+  api.netStats.rtt = 800;
+  api.updateDelayTarget();
+  ok(Math.abs(api.target - low) < 1e-9 && Math.abs(low - 0.15) < 1e-9,
+    'stable 800 ms RTT uses the same interpolation buffer as 20 ms RTT');
+  api.netStats.gaps.splice(0, 60, ...Array(54).fill(33), ...Array(6).fill(200));
+  api.updateDelayTarget();
+  ok(api.target > low && api.target <= 0.4, 'uneven arrivals still increase the bounded jitter buffer');
+}
+
 // ══════════════════════════════ S1 — slow internet line ══════════════════════════════
 // the "realistic bad connection" from the original scenario: 167 ms one-way,
 // ±2 tick jitter, 5% snapshot drop
@@ -311,7 +331,7 @@ const arrGapsOf = t => { const g = []; for (let i = 1; i < t.length; i++) g.push
   const m = runScenario('S1', { baseLat: 5, jit: 2, loss: 0.05 });
   const arrGaps = arrGapsOf(m.arrTimes);
   console.log(`S1 slow line (5 ticks one-way, ±2 tick jitter, 5% drop, ${N_TICKS} ticks):`);
-  ok(m.delay >= 0.25, `adaptive delay grows to cover the latency (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s)`);
+  ok(m.delay >= 0.15 && m.delay < 0.22, `buffer covers jitter without duplicating transit (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s)`);
   ok(p95(m.jumpErr, 0.99) < 0.9, `remote motion stays smooth under load (p99 frame jump ${p95(m.jumpErr, 0.99).toFixed(2)} u over ${m.jumpErr.length} frames, max ${m.jumpErr.length ? Math.max(...m.jumpErr).toFixed(2) : '--'} u)`);
   ok(m.moving > 0 && m.freeze / m.moving < 0.02,
     `no starvation freezes while remotes move (${m.freeze}/${m.moving} frames, ${m.extrap} frames extrapolated)`);
@@ -324,30 +344,30 @@ const arrGapsOf = t => { const g = []; for (let i = 1; i < t.length; i++) g.push
 }
 
 // ═══════════════════════════ S2 — low-latency baseline ═══════════════════════════
-// LAN-ish line: 33 ms one-way, ±1 tick, no loss. The adaptive delay must
-// SHRINK back toward its floor — a permanently high delay on a good line is
-// as wrong as no delay on a bad one. (Target = 0.15 base + one-way + 0.5×jitter
-// ≈ 0.22 s for this line, vs 0.38 s on S1's slow line.)
+// LAN-ish line: 33 ms one-way, ±1 tick, no loss. Only arrival jitter
+// adds to the 150 ms safety buffer; stable transit is already in the clock.
 {
   const m = runScenario('S2', { baseLat: 1, jit: 1, loss: 0 });
   console.log(`S2 low-latency baseline (1 tick one-way, ±1 tick jitter, no loss, ${N_TICKS} ticks):`);
-  ok(m.delay <= 0.25, `delay shrinks toward the floor on a good line (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s, S1 was 0.38 s)`);
-  ok(p95(m.jumpErr, 0.99) < 0.5, `remote motion smooth (p99 frame jump ${p95(m.jumpErr, 0.99).toFixed(2)} u, max ${m.jumpErr.length ? Math.max(...m.jumpErr).toFixed(2) : '--'} u)`);
+  ok(m.delay >= 0.15 && m.delay < 0.19, `delay shrinks toward the floor on a good line (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s)`);
+  // Less buffering exposes a different part of the same physical trajectory.
+  // Bound frame displacement to 0.55 u (16.5 u/s at 30 Hz), and retain
+  // the independent starvation and own-player alignment assertions.
+  ok(p95(m.jumpErr, 0.99) < 0.55, `remote motion smooth (p99 frame jump ${p95(m.jumpErr, 0.99).toFixed(2)} u, max ${m.jumpErr.length ? Math.max(...m.jumpErr).toFixed(2) : '--'} u)`);
   ok(m.moving > 0 && m.freeze / m.moving < 0.015, `no starvation freezes (${m.freeze}/${m.moving} frames)`);
   ok(m.myErrQuiet.length > 100 && p95(m.myErrQuiet, 0.95) < 0.5, `own screen tight on a good line (quiet-frame p95 ${p95(m.myErrQuiet, 0.95).toFixed(2)} u, mean ${mean(m.myErrQuiet).toFixed(2)} u; all-frame p95 ${p95(m.myErr, 0.95).toFixed(2)} u)`);
 }
 
 // ═══════════════════════════ S3 — extreme slow line ═══════════════════════════
 // "Slow 3G"-class: 400 ms one-way, ±4 tick jitter, 10% loss. The adaptive
-// delay saturates at its 0.4 s cap and starvation is frequent — the
-// extrapolation cap (EXTRAP_MAX) is what keeps the frame-to-frame motion
-// bounded instead of freezing-and-jumping.
+// buffer should grow for jitter without saturating merely because RTT is high.
+// The extrapolation cap still bounds motion during packet starvation.
 {
   const m = runScenario('S3', { baseLat: 12, jit: 4, loss: 0.10 });
   const arrGaps = arrGapsOf(m.arrTimes);
   console.log(`S3 extreme line (12 ticks one-way, ±4 tick jitter, 10% drop, ${N_TICKS} ticks):`);
-  ok(m.delay >= 0.38, `delay saturates at the cap to cover the line (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s, cap 0.40 s)`);
-  ok(p95(m.jumpErr, 0.99) < 1.5, `remote motion still bounded at the cap (p99 frame jump ${p95(m.jumpErr, 0.99).toFixed(2)} u, max ${m.jumpErr.length ? Math.max(...m.jumpErr).toFixed(2) : '--'} u)`);
+  ok(m.delay >= 0.19 && m.delay < 0.25, `buffer grows for jitter without saturating on high RTT (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s, cap 0.40 s)`);
+  ok(p95(m.jumpErr, 0.99) < 1.5, `remote motion remains bounded (p99 frame jump ${p95(m.jumpErr, 0.99).toFixed(2)} u, max ${m.jumpErr.length ? Math.max(...m.jumpErr).toFixed(2) : '--'} u)`);
   ok(m.moving > 0 && m.freeze / m.moving < 0.05,
     `freezes stay rare despite heavy starvation (${m.freeze}/${m.moving} frames, ${m.extrap} frames extrapolated)`);
   // S3 is the harshest line (12 ticks one-way, ±4 jitter, 10% loss): remote bullets are rebuilt from stale
@@ -385,8 +405,9 @@ const arrGapsOf = t => { const g = []; for (let i = 1; i < t.length; i++) g.push
     `motion is smooth again after recovery (post-outage p99 frame jump ${p95(post, 0.99).toFixed(2)} u over ${post.length} frames)`);
   ok(m.myErrQuiet.length > 100 && p95(m.myErrQuiet, 0.95) < 1.0, `outside bonk/fall/respawn events (and the 2 s after them) the screen stays on the server's trajectory (quiet-frame p95 ${p95(m.myErrQuiet, 0.95).toFixed(2)} u over ${m.myErrQuiet.length}/${m.myErr.length} frames; a local fall/respawn on stale crumble state during the outage is an event)`);
   ok(errTail.length > 50 && p95(errTail, 0.95) < 2.0, `correction converges after recovery (last-3s p95 ${p95(errTail, 0.95).toFixed(2)} u; ≤ the shipped client's 1.5 u + one remote bonk)`);
-  ok(m.delay >= 0.25, `delay back to cover the line after recovery (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s)`);
+  ok(m.delay >= 0.15 && m.delay < 0.22, `jitter buffer recovers after outage (delay ${m.delay.toFixed(2)} s, target ${m.target.toFixed(2)} s)`);
 }
 
 console.log('\n' + (failures === 0 ? 'LATENCY/LOSS: ALL PASS' : `LATENCY/LOSS: ${failures} FAILURE(S)`));
 process.exit(failures === 0 ? 0 : 1);
+
