@@ -495,6 +495,7 @@ const snapBuf = [];   // raw server 'state' snapshots, oldest first
 let netMine = null;   // last server sample of my player (correction target)
 let netMineDead = false, lastNetPhase = '', needHardSnapMe = false;
 let simAcc = 0, lastSentInp = null, lastSentAt = 0, lastInpAt = 0;
+let pendingFallStamp = null, lastJumpStamp = 0;
 let lastDiveStamp = 0, lastFireStamp = 0, lastPickupStamp = 0;
 // lastInpAt: sim time of the last REAL input (change or pulse) — the keep-alive
 // resend doesn't re-arm it. Drives the input-confirmation window in applyNet:
@@ -533,6 +534,7 @@ function resetNet() {
   snapBuf.length = 0;
   netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
   simAcc = 0; lastSentInp = null; lastSentAt = 0; lastInpAt = 0;
+  pendingFallStamp = null; lastJumpStamp = 0;
   lastDiveStamp = 0; lastFireStamp = 0; lastPickupStamp = 0;
   interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
   evQueue.length = 0;
@@ -599,6 +601,7 @@ function sendMPInput(input, stampT) {
   const now = performance.now();
   const l = lastSentInp;
   const changed = !l || input.mx !== l.mx || input.mz !== l.mz || input.fire !== l.fire;
+  if (input.jump) lastJumpStamp = stampT;
   if (input.dive) lastDiveStamp = stampT;
   if (input.fire) lastFireStamp = stampT;
   if (changed || input.jump || input.dive || now - lastSentAt >= 100) {
@@ -641,10 +644,10 @@ function lerpPair() {
 // "stops, then slides forward over the edge" bug. So the sample is compared with what
 // we predicted at the matching moment; with no real divergence that error is ~0 and
 // nothing is applied. Only the excess over OWN_DZ is eased in, and the same offset is
-// added to the history so the next sample doesn't count it twice. Velocity is never
-// touched (the local sim stays the solo prediction); y is only reconciled while both
-// the history and the sample are grounded (the local sim owns jump arcs).
-function reconcileOwn(s, sp, tArr) {
+// added to the history so the next sample doesn't count it twice. Velocity is
+// corrected only for meaningful residuals; ordinary airborne arcs stay locally
+// owned, except when an acknowledged landing proves a descending miss.
+function reconcileOwn(s, sp, tArr, p) {
   if (needHardSnapMe || !ownHist.length) return;
   let tm;
   if (sp.ack > 0) {
@@ -664,11 +667,19 @@ function reconcileOwn(s, sp, tArr) {
     if (a.w <= tm && tm <= b.w) {
       const k = b.w > a.w ? (tm - a.w) / (b.w - a.w) : 1;
       h = { x: a.x + (b.x - a.x) * k, y: a.y + (b.y - a.y) * k, z: a.z + (b.z - a.z) * k, g: a.g && b.g,
-            vx: a.vx + (b.vx - a.vx) * k, vz: a.vz + (b.vz - a.vz) * k };
+            vy: a.vy + (b.vy - a.vy) * k, vx: a.vx + (b.vx - a.vx) * k, vz: a.vz + (b.vz - a.vz) * k };
       break;
     }
   }
   if (!h) return;
+  // Acknowledged landing disagrees with our descending trajectory. Recover
+  // before reaching KILL_Y, but never cancel a jump/dive issued after that sample.
+  if (p && sp.ack > 0 && !h.g && h.vy < -1 && sp.ground >= 0 &&
+      sp.y - h.y > 0.6 && p.vy <= 0 && !p.ground &&
+      lastJumpStamp <= sp.ack && lastDiveStamp <= sp.ack) {
+    needHardSnapMe = true;
+    return;
+  }
   const ex = sp.x - h.x, ey = sp.y - h.y, ez = sp.z - h.z;
   if (ex * ex + ey * ey + ez * ez > 64) { needHardSnapMe = true; return; }  // |err| > 8 u
   const mag = Math.hypot(ex, ez);
@@ -698,6 +709,18 @@ function applyOwnCorrection(p, dt) {
     p.x = netMine.x; p.y = netMine.y; p.z = netMine.z; p.yaw = netMine.yaw;
     p.vx = netMine.vx; p.vy = netMine.vy; p.vz = netMine.vz;
     p.ground = netMine.ground >= 0 ? sim.solids[netMine.ground] : null;
+    // A grounded sample is attached to a moving platform at sample time.
+    // Preserve that local contact point at the client's current platform pose.
+    if (p.ground && p.ground.active && sim.solidPose) {
+      const g = p.ground, old = sim.solidPose(g.id, netMine.t);
+      const dx = p.x - old.cx, dz = p.z - old.cz;
+      const c = Math.cos(old.yaw), sn = Math.sin(old.yaw);
+      const lx = dx * c - dz * sn, lz = dx * sn + dz * c;
+      const nc = Math.cos(g.yaw), ns = Math.sin(g.yaw);
+      p.x = g.cx + lx * nc + lz * ns; p.z = g.cz - lx * ns + lz * nc;
+      p.y = g.cy + g.hy;
+    }
+    if (p.ground && !p.ground.active) p.ground = null;
     needHardSnapMe = false; netStats.snaps++;
     ownHist.length = 0; ownPend.x = ownPend.y = ownPend.z = 0; ownPendV.x = ownPendV.z = 0;
   } else {
@@ -712,6 +735,26 @@ function applyOwnCorrection(p, dt) {
   netStats.corr = Math.hypot(ownPend.x, ownPend.y, ownPend.z);
 }
 // </own-reconcile-fns>
+
+// Only server snapshots commit death/respawn. An alive snapshot predating a
+// predicted fall cannot resolve it; wait until the input playhead reaches it.
+function syncOwnLife(p, sp, nowS) {
+  const dead = sp.dead > 0;
+  if (dead !== netMineDead) {
+    netMineDead = dead; needHardSnapMe = true;
+    onEvent({ t: dead ? 'fall' : 'respawn', id: me, x: sp.x, y: sp.y, z: sp.z });
+  }
+  if (p._pendingFall) {
+    if (pendingFallStamp === null) pendingFallStamp = nowS;
+    const legacyReady = !(sp.ack > 0) && nowS - pendingFallStamp >
+      Math.max(0.35, Math.min(1.2, netStats.rtt / 1000) + 0.15);
+    const resolved = dead || legacyReady || (sp.ack > 0 && sp.ack + ACK_LEAD >= pendingFallStamp);
+    if (!resolved) return false;
+    p._pendingFall = false; pendingFallStamp = null; needHardSnapMe = true;
+  }
+  p.dead = sp.dead; p.protect = sp.protect;
+  return true;
+}
 
 function applyNet(dt) {
   const S = sim, L = lerpPair(), remotes = [];
@@ -824,7 +867,7 @@ function applyNet(dt) {
   // true discontinuities: fall/respawn, phase change, |err| > 8 u).
   if (netMine) {
     const p = S.players[me];
-    if (!p) return remotes;
+    if (!p || p._pendingFall) return remotes;
     applyOwnCorrection(p, dt);
   }
   return remotes;
@@ -846,9 +889,10 @@ function update(dt, t) {
       if (n >= 10) simAcc = 0;  // drop backlog instead of spiral-of-death
       // where we predict ourselves to be, on the wall clock; reconcileOwn() compares server samples with this
       const pm = sim.players[me];
+      if (pm && pm._pendingFall && pendingFallStamp === null) pendingFallStamp = stampT;
       if (pm) {
         // labelled by the stamp of the input that produced it (what the server acks)
-        ownHist.push({ w: stampT, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground, vx: pm.vx, vz: pm.vz });
+        ownHist.push({ w: stampT, x: pm.x, y: pm.y, z: pm.z, g: !!pm.ground, vx: pm.vx, vy: pm.vy, vz: pm.vz });
         while (ownHist.length && ownHist[0].w < stampT - OWN_HIST_S) ownHist.shift();
       }
       // re-apply the remote interpolation after the local step: neutral-input physics
@@ -1164,6 +1208,7 @@ if (isMP) {
       // remotes run on neutral local input: their motion is the interpolated network
       // state, so local bot think()/fires/jumps can't desync or double-fire events
       for (let i = 0; i < sim.players.length; i++) if (i !== me) sim.players[i]._mpInput = NEUTRAL;
+      sim.players[me]._serverLife = true;
       sim.begin(); // start the local countdown; server state syncs the exact cd within 50ms
       vis = sim.players.map(() => ({ phase: Math.random() * TAU, squash: 0, dust: 0 }));
       flags = [];
@@ -1218,9 +1263,7 @@ if (isMP) {
         if (!p || !sp) continue;
 
         if (i === me) {
-          const dead = sp.dead > 0;
-          if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }  // fall/respawn
-          p.dead = sp.dead; p.protect = sp.protect;
+          const lifeReady = syncOwnLife(p, sp, nowS);
           p.falls = sp.falls; p.bonks = sp.bonks;
           // Checkpoints and finish are monotonic within a race: never regress them on stale snapshots
           p.cp = Math.max(p.cp, sp.cp);
@@ -1244,7 +1287,7 @@ if (isMP) {
 
           // position correction happens in applyNet(); keep the last server sample as target
           netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };  // (reconcileOwn reads sp.ack)
-          reconcileOwn(s, sp, nowS);
+          if (lifeReady) reconcileOwn(s, sp, nowS, p);
         } else {
           p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
           p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
