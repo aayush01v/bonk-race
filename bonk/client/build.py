@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """Build the two playable single-file clients from the shared sources.
 
-  python3 build.py            builds both
-  python3 build.py webgl      builds dist/sim-race-webgl.html   (hand-written WebGL1 renderer, no network needed)
-  python3 build.py babylon    builds dist/sim-race-babylon.html (Babylon.js renderer, loads Babylon from a CDN)
+  python3 build.py            builds both (into dist/ and repo root)
+  python3 build.py webgl      builds dist/sim-race-webgl.html + ../../sim-race-webgl.html
+  python3 build.py babylon    builds dist/sim-race-babylon.html + ../../sim-race-babylon.html
 
-Sources in this folder: ui.html (page + CSS), game.js (input, HUD, audio, camera, particle data),
+Sources in this folder: ui.html (page + CSS), game.js (input, HUD, audio, camera, particle data, MP netcode),
 gl.js (WebGL1 renderer), bjs.js (Babylon renderer).  The sim is read from ../sim.js (or ./sim.js).
 
 The Babylon build is game.js with two blocks swapped: the renderer lookup at the top and the
-"drawing" section.  Everything else (input, HUD, audio, menu, results) is the same code in both builds.
+"drawing" section.  Everything else (input, HUD, audio, menu, results, MP netcode) is the same code in both builds.
 """
 import re, sys
 from pathlib import Path
 
 here = Path(__file__).resolve().parent
+root = here.parent.parent
 read = lambda p: Path(p).read_text(encoding="utf-8")
 sim_path = here / "sim.js" if (here / "sim.js").exists() else here.parent / "sim.js"
 BABYLON_URL = "https://cdnjs.cloudflare.com/ajax/libs/babylonjs/8.20.0/babylon.js"
@@ -80,6 +81,12 @@ if __name__ == "__main__":
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     dist = here / "dist"; dist.mkdir(exist_ok=True)
     if which in ("all", "webgl"):
-        (dist / "sim-race-webgl.html").write_text(build_webgl(), encoding="utf-8"); print("built dist/sim-race-webgl.html")
+        webgl_html = build_webgl()
+        (dist / "sim-race-webgl.html").write_text(webgl_html, encoding="utf-8")
+        (root / "sim-race-webgl.html").write_text(webgl_html, encoding="utf-8")
+        print("built dist/sim-race-webgl.html and sim-race-webgl.html")
     if which in ("all", "babylon"):
-        (dist / "sim-race-babylon.html").write_text(build_babylon(), encoding="utf-8"); print("built dist/sim-race-babylon.html")
+        babylon_html = build_babylon()
+        (dist / "sim-race-babylon.html").write_text(babylon_html, encoding="utf-8")
+        (root / "sim-race-babylon.html").write_text(babylon_html, encoding="utf-8")
+        print("built dist/sim-race-babylon.html and sim-race-babylon.html")

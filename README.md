@@ -83,9 +83,9 @@ WebGL client; `sim-race-babylon.html` is the Babylon.js solo client.
 ### Risks and follow-up
 
 - **Generated-client drift:** `bonk/client/dist/*.html` are built artifacts,
-  while the root `sim-race-webgl.html` and `sim-race-babylon.html` are also
-  tracked copies used by the server/tests. Rebuild and keep both locations in
-  sync after changing `bonk/sim.js`, `game.js`, or a renderer.
+  and the root `sim-race-webgl.html` and `sim-race-babylon.html` are tracked
+  copies used by the server/tests. `npm run build` now regenerates both
+  locations from shared sources, including multiplayer netcode.
 - **Babylon verification boundary:** automated Babylon coverage uses
   `bonk/client/mock_babylon.js`; real Babylon CDN rendering and device/GPU
   performance still require a browser with network access.
@@ -141,7 +141,7 @@ offline run.
 ## Build and test
 
 ```bash
-npm run build                     # rebuild both bonk/client/dist/*.html
+npm run build                     # rebuild both dist/ and root client HTML files
 node bonk/tests.js                # simulation invariants and bot statistics
 npm test                          # simulation + multiplayer pipeline suites
 npm run test:e2e                  # live WebSocket end-to-end tests
@@ -186,10 +186,11 @@ down from 380 ms, with no moving-player starvation freezes. This improves
 rendering latency, not network ping. Real-device multiplayer playtesting is
 still needed.
 
-The shared `bonk/client/game.js` and its generated `dist` files currently
-contain an older multiplayer implementation. Rebuilding them does not update
-the specialized root multiplayer client; do not overwrite that client with
-the generated WebGL file.
+The shared `bonk/client/game.js` now contains the multiplayer implementation.
+`npm run build` generates matching root and `bonk/client/dist` HTML files for
+both renderers. Edit shared sources and rebuild instead of editing generated
+HTML directly. `test_bugfixes.js` checks root/dist consistency alongside the
+regressions for gameplay, lobby handling, settings, and input validation.
 
 ## Verification status
 

@@ -479,10 +479,12 @@ let ws = null;
 let myId = null;
 let myName = localStorage.getItem('bonk_name') || '';
 let myKind = localStorage.getItem('bonk_kind') || 'zombie';
+if (!KINDS[myKind]) myKind = 'zombie';
 let roomCode = null;
 let isHost = false;
 let lobbyData = null;
 let gameWindow = null;
+let lastRaceMsg = null, initRetryIv = null;
 
 /* ─── floating particles ─── */
 (function initParticles() {
@@ -514,6 +516,7 @@ let gameWindow = null;
   pickKind(myKind);
 })();
 function pickKind(id) {
+  if (!KINDS[id]) id = 'zombie';
   myKind = id;
   localStorage.setItem('bonk_kind', id);
   document.querySelectorAll('.chip').forEach(b => b.classList.toggle('selected', b.dataset.k === id));
@@ -571,6 +574,13 @@ function connect() {
   ws.onclose = () => {
     $('connDot').className = 'conn-dot off';
     $('connText').textContent = 'Disconnected';
+    if (roomCode) {
+      roomCode = null; isHost = false;
+      if (initRetryIv) { clearInterval(initRetryIv); initRetryIv = null; }
+      $('gameIframe').style.display = 'none';
+      $('resultsOverlay').classList.remove('active');
+      showScreen('screenMenu');
+    }
     setTimeout(connect, 2000);
   };
 
@@ -607,6 +617,7 @@ function handleMessage(msg) {
       break;
 
     case 'raceStart':
+      $('resultsOverlay').classList.remove('active');
       showScreen('screenRacing');
       launchGame(msg);
       break;
@@ -637,9 +648,11 @@ function handleMessage(msg) {
 
     case 'kicked':
       roomCode = null; isHost = false;
+      if (initRetryIv) { clearInterval(initRetryIv); initRetryIv = null; }
       // drop the live game iframe (raceEnd does the same) — otherwise the
       // still-running race stays visible on top of the menu
       $('gameIframe').style.display = 'none';
+      $('resultsOverlay').classList.remove('active');
       showScreen('screenMenu');
       toast('You were kicked from the room.', true);
       break;
@@ -742,37 +755,46 @@ function updateShareLink() {
 async function fetchRooms() {
   try {
     const res = await fetch('/api/rooms');
-    const list = await res.json();
+    const list = (await res.json()).filter(r => r.state === 'lobby' || r.state === 'results');
     const panel = $('browserPanel');
     const el = $('roomList');
     if (list.length === 0) {
       panel.style.display = 'none';
+      el.innerHTML = '';
       return;
     }
     panel.style.display = '';
     el.innerHTML = '';
     list.forEach(r => {
-      if (r.state !== 'lobby') return;
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,253,247,0.05);border-radius:12px;margin-bottom:6px;';
-      row.innerHTML = `
-        <span style="font-weight:900;font-size:18px;color:var(--yellow);letter-spacing:0.1em;">${r.code}</span>
-        <span style="flex:1;">hosted by <strong>${r.hostName}</strong></span>
-        <span style="color:var(--mint);">${r.playerCount}/${r.maxPlayers}</span>
-      `;
+
+      const codeSpan = document.createElement('span');
+      codeSpan.style.cssText = 'font-weight:900;font-size:18px;color:var(--yellow);letter-spacing:0.1em;';
+      codeSpan.textContent = r.code;
+
+      const hostSpan = document.createElement('span');
+      hostSpan.style.flex = '1';
+      hostSpan.textContent = 'hosted by ';
+      const hostStrong = document.createElement('strong');
+      hostStrong.textContent = r.hostName;
+      hostSpan.appendChild(hostStrong);
+
+      const countSpan = document.createElement('span');
+      countSpan.style.color = 'var(--mint)';
+      countSpan.textContent = `${r.playerCount}/${r.maxPlayers}`;
+
       const joinBtn = document.createElement('button');
       joinBtn.className = 'btn btn-mint btn-small';
       joinBtn.textContent = 'Join';
       joinBtn.addEventListener('click', () => joinRoom(r.code));
-      row.appendChild(joinBtn);
+      row.append(codeSpan, hostSpan, countSpan, joinBtn);
       el.appendChild(row);
     });
   } catch(e) {}
 }
 
 /* ─── launch game ─── */
-let lastRaceMsg = null, initRetryIv = null;
-
 function sendInitToGame() {
   if (!lastRaceMsg || !gameWindow || gameWindow.closed) return;
   gameWindow.postMessage({
@@ -810,6 +832,7 @@ window.addEventListener('message', e => {
 
 function launchGame(raceMsg) {
   lastRaceMsg = raceMsg;
+  $('resultsOverlay').classList.remove('active');
   const renderer = 'sim-race-webgl.html';
   const gameUrl = '/' + renderer + '?mp=1';
 
@@ -838,9 +861,11 @@ function showResults(ranking) {
   overlay.classList.add('active');
   $('gameIframe').style.display = 'none';
 
-  const myRank = ranking.find(r => !r.bot && r.id !== undefined);
-  $('resultsTitle').textContent = ranking[0] && !ranking[0].bot ? '🏆 You Won!' : '🏁 Race Over';
-  $('resultsSub').textContent = `${ranking.length} racers finished`;
+  const mySimId = lastRaceMsg ? lastRaceMsg.you : -1;
+  const won = ranking[0] && ranking[0].finished && ranking[0].id === mySimId;
+  const finCount = ranking.filter(r => r.finished).length;
+  $('resultsTitle').textContent = won ? '🏆 You Won!' : '🏁 Race Over';
+  $('resultsSub').textContent = `${finCount} of ${ranking.length} racers finished`;
 
   const list = $('resultsList');
   list.innerHTML = '';
@@ -900,6 +925,9 @@ function joinRoom(code) {
 $('btnLeave').addEventListener('click', () => {
   if (ws) ws.send(JSON.stringify({ type: 'leave' }));
   roomCode = null; isHost = false;
+  if (initRetryIv) { clearInterval(initRetryIv); initRetryIv = null; }
+  $('gameIframe').style.display = 'none';
+  $('resultsOverlay').classList.remove('active');
   showScreen('screenMenu');
   fetchRooms();
 });

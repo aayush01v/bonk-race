@@ -6,7 +6,7 @@
            node tests.js falls          why do bots fall in the crumble-tile section?
            node tests.js trace [z0 z1]  frame-by-frame history of the first falls between z0..z1 */
 const Sim = require('./sim.js');
-const KINDS = ['zombie', 'student'];
+const KINDS = ['zombie', 'pumpkin'];
 const bucket = z => z < 45 ? 'alley(0-45)' : z < 56 ? 'rest(45-56)' : z < 70 ? 'sliders(56-70)' : z < 85 ? 'tiles(70-85)'
   : z < 120 ? 'bridge(85-120)' : z < 135 ? 'launch(120-135)' : z < 165 ? 'disc(135-165)' : 'final(165+)';
 const fmt = (a, n = 1) => a.map(v => v.toFixed(n)).join(' / ');
@@ -68,7 +68,7 @@ function invariants() {
   let bad = 0; const ok = (c, m) => { if (!c) { bad++; console.log('FAIL', m); } };
   { // standing still on every static slab never falls through
     const S = Sim.create(3); S.humanId = 0;
-    const h = S.addPlayer({ bot: false, kind: 'student' }); S.begin();
+    const h = S.addPlayer({ bot: false, kind: 'pumpkin' }); S.begin();
     for (let i = 0; i < 200; i++) S.step(1 / 60, { mx: 0, mz: 0 });
     ok(S.phase === 'race', 'race phase reached');
     for (const s of S.solids.filter(s => s.kind === 'static' && !s.bounce)) {

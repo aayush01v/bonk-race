@@ -38,7 +38,7 @@ function buildCourse() {
     const s = Object.assign({
       id: uid++, kind: 'static', shape: 'slab', color: '#ffd23f', yaw: 0,
       vx: 0, vy: 0, vz: 0, om: 0, dyaw: 0, active: true, hazard: false, e: 0,
-      bounce: 0, cp: -1, state: 'idle', timer: 0, fvy: 0
+      bounce: 0, cp: -1, state: 'idle', timer: 0, hold: 1.2, fvy: 0
     }, o);
     s.rad = s.round ? s.hx : hyp(s.hx, s.hz);
     s.b = { cx: s.cx, cy: s.cy, cz: s.cz, yaw: s.yaw };
@@ -164,20 +164,20 @@ function create(seed) {
   const R = mulberry(seed || 7);
   const C = buildCourse();
   const S = {
-    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1,
+    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1, grav: GRAV,
     players: [], bullets: [], ev: [],
     solids: C.solids, deco: C.deco, pickups: C.pickups, cps: C.cps, route: C.route,
     finishZ: C.finishZ, length: C.length
   };
   const EMPTY = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
-  const SLOTS = [-4.75, -2.85, -0.95, 0.95, 2.85, 4.75];
+  const SLOTS = [-4.75, -2.85, -0.95, 0.95, 2.85, 4.75, -6.65, 6.65];
   const emit = (t, p, extra) => S.ev.push(Object.assign({ t, id: p ? p.id : -1, x: p ? p.x : 0, y: p ? p.y : 0, z: p ? p.z : 0 }, extra));
 
   function resetPlayer(p, slot) {
     Object.assign(p, {
-      x: SLOTS[slot % 6], y: 0.02, z: 0.5, vx: 0, vy: 0, vz: 0, yaw: 0, ground: null, coyote: 0, jbuf: 0,
+      x: SLOTS[slot % SLOTS.length], y: 0.02, z: 0.5, vx: 0, vy: 0, vz: 0, yaw: 0, ground: null, coyote: 0, jbuf: 0,
       stun: 0, stunMax: 0, getup: 0, flop: 1, diveT: 0, diveCd: 0, fireCd: 0, hitCd: 0, protect: 0,
-      dead: 0, ammo: 0, cp: 0, finished: false, finishT: 0, place: 0, blocked: false, gvx: 0, gvz: 0,
+      dead: 0, ammo: 0, cp: 0, finished: false, left: false, finishT: 0, place: 0, blocked: false, gvx: 0, gvz: 0,
       falls: 0, bonks: 0
     });
     p.ai.react = 0.15 + R() * 0.3; p.ai.jcd = p.ai.dcd = p.ai.fcd = 0;
@@ -207,7 +207,7 @@ function create(seed) {
   };
   S.begin = () => S.reset('countdown');
   S.ranking = () => S.players.slice().sort((a, b) =>
-    (b.finished - a.finished) || (a.finished && b.finished ? a.finishT - b.finishT : b.z - a.z));
+    (!!a.left - !!b.left) || (b.finished - a.finished) || (a.finished && b.finished ? a.finishT - b.finishT : b.z - a.z));
 
   /* ---------------- solids ---------------- */
   function updateSolid(s, dt) {
@@ -225,7 +225,7 @@ function create(seed) {
           s.timer -= dt;
           if (s.timer <= 0) { s.state = 'fall'; s.active = false; s.fvy = 0; s.timer = 1.0; emit('crumble', null, { x: s.cx, y: s.cy, z: s.cz }); }
         } else if (s.state === 'fall') {
-          s.fvy -= GRAV * 0.8 * dt; s.cy += s.fvy * dt; s.timer -= dt;
+          s.fvy -= S.grav * 0.8 * dt; s.cy += s.fvy * dt; s.timer -= dt;
           if (s.timer <= 0) { s.state = 'gone'; s.timer = 0.8; }
         } else if (s.state === 'gone') {
           s.timer -= dt;
@@ -295,7 +295,10 @@ function create(seed) {
       }
       p.gvx = gv[0]; p.gvz = gv[1];
       p.ground = ground; p.y = gtop; if (p.vy < 0) p.vy = 0;
-      if (ground.kind === 'crumble' && ground.state === 'idle') { ground.state = 'shake'; ground.timer = 1.2; emit('shake', null, { x: ground.cx, y: ground.cy, z: ground.cz }); }
+      if (ground.kind === 'crumble' && ground.state === 'idle') {
+        ground.state = 'shake'; ground.timer = ground.hold || 1.2;
+        emit('shake', null, { x: ground.cx, y: ground.cy, z: ground.cz });
+      }
       if (ground.cp > p.cp) { p.cp = ground.cp; emit('cp', p, { cp: p.cp }); }
     } else if (was) { p.vx += p.gvx; p.vz += p.gvz; p.ground = null; }
 
@@ -336,7 +339,7 @@ function create(seed) {
   function think(p, dt) {
     const inp = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
     const A = p.ai;
-    if (S.phase !== 'race' || p.finished || p.dead > 0) return inp;
+    if (S.phase !== 'race' || p.finished || p.left || p.dead > 0) return inp;
     A.react -= dt; A.jcd -= dt; A.dcd -= dt; A.fcd -= dt;
     if (A.react > 0) return inp;
 
@@ -360,14 +363,14 @@ function create(seed) {
     }
     if (p.ground && A.dcd <= 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0) continue;
+        if (q === p || q.dead > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z, d = hyp(dx, dz);
         if (d < 1.9 && Math.abs(wrap(Math.atan2(dx, dz) - p.yaw)) < 0.5 && R() < 0.25 * A.skill) { inp.dive = true; A.dcd = 3.5; break; }
       }
     }
     if (p.ammo > 0 && p.fireCd <= 0 && A.fcd <= 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0 || q.finished) continue;
+        if (q === p || q.dead > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z, d = hyp(dx, dz);
         if (d > 2 && d < 15 && Math.abs(q.y - p.y) < 1.6 && Math.abs(wrap(Math.atan2(dx, dz) - p.yaw)) < 0.16) { inp.fire = true; A.fcd = 1.3 + R(); break; }
       }
@@ -377,6 +380,12 @@ function create(seed) {
 
   /* ---------------- one player ---------------- */
   function respawn(p) {
+    if (p.finished) {
+      p.x = 0; p.z = S.finishZ + 2; p.y = 3.6;
+      p.vx = p.vy = p.vz = 0; p.yaw = 0; p.ground = null; p.protect = 1.5; p.hitCd = 0;
+      p.stun = 0; p.getup = 0; p.diveT = 0;
+      return;
+    }
     const c = S.cps[p.cp];
     p.x = c.x + (R() - 0.5) * 3; p.z = c.z + (R() - 0.5) * 1.5; p.y = c.y + 0.6;
     p.vx = p.vy = p.vz = 0; p.yaw = 0; p.ground = null; p.protect = 1.5; p.hitCd = 0;
@@ -384,6 +393,7 @@ function create(seed) {
     emit('respawn', p);
   }
   function stepPlayer(p, inp, dt) {
+    if (p.left) return;
     if (p.dead > 0) { p.dead -= dt; if (p.dead <= 0) respawn(p); return; }
     p.coyote -= dt; p.jbuf -= dt; p.diveCd -= dt; p.fireCd -= dt; p.hitCd -= dt; p.protect -= dt;
     if (p.stun > 0) { p.stun -= dt; if (p.stun <= 0) { p.stun = 0; p.getup = 0.35; } }
@@ -431,7 +441,7 @@ function create(seed) {
     // dive bonks whoever it hits
     if (p.diveT > 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0 || q.hitCd > 0 || q.protect > 0) continue;
+        if (q === p || q.dead > 0 || q.hitCd > 0 || q.protect > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z;
         if (Math.abs(q.y - p.y) < 1.0 && dx * dx + dz * dz < 1.56) {
           knock(q, Math.sin(p.yaw) * 9.5, Math.cos(p.yaw) * 9.5, 5.2, 1.0);
@@ -441,12 +451,15 @@ function create(seed) {
       }
     }
 
-    if (!p.ground) p.vy = Math.max(p.vy - GRAV * dt, -MAX_FALL);
+    if (!p.ground) p.vy = Math.max(p.vy - S.grav * dt, -MAX_FALL);
     const prevY = p.y;
     p.x += p.vx * dt; p.z += p.vz * dt; p.y += p.vy * dt;
     collide(p, prevY);
 
-    if (p.y < KILL_Y) { p.dead = 1.1; p.ground = null; p.stun = 0; p.diveT = 0; p.falls++; emit('fall', p); return; }
+    if (p.y < KILL_Y) {
+      if (p.finished) { respawn(p); return; }
+      p.dead = 1.1; p.ground = null; p.stun = 0; p.diveT = 0; p.falls++; emit('fall', p); return;
+    }
     if (!p.finished && racing && p.ground && p.z >= S.finishZ) {
       p.finished = true; p.finishT = S.raceT; p.place = ++S.finishCount; emit('finish', p, { place: p.place });
     }
@@ -456,7 +469,7 @@ function create(seed) {
     const P = S.players;
     for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
       const a = P[i], b = P[j];
-      if (a.dead > 0 || b.dead > 0 || Math.abs(a.y - b.y) > PH * 0.75) continue;
+      if (a.dead > 0 || b.dead > 0 || a.left || b.left || Math.abs(a.y - b.y) > PH * 0.75) continue;
       let dx = a.x - b.x, dz = a.z - b.z;
       const d = hyp(dx, dz), md = PR * 2;
       if (d >= md) continue;
@@ -480,7 +493,7 @@ function create(seed) {
         if (footprint(s, b.x, b.z).d < 0.15) { dead = true; emit('spark', null, { x: b.x, y: b.y, z: b.z }); break; }
       }
       if (!dead) for (const q of S.players) {
-        if (q.id === b.owner || q.dead > 0 || q.protect > 0) continue;
+        if (q.id === b.owner || q.dead > 0 || q.hitCd > 0 || q.protect > 0 || q.finished || q.left) continue;
         const dx = q.x - b.x, dz = q.z - b.z;
         if (b.y > q.y && b.y < q.y + PH && dx * dx + dz * dz < (PR + 0.22) * (PR + 0.22)) {
           knock(q, b.vx * 0.3, b.vz * 0.3, 5.5, 0.9);
@@ -497,7 +510,7 @@ function create(seed) {
     for (const k of S.pickups) {
       if (!k.on) { k.t -= dt; if (k.t <= 0) k.on = true; continue; }
       for (const p of S.players) {
-        if (p.dead > 0 || p.finished || p.ammo >= MAX_AMMO) continue;
+        if (p.dead > 0 || p.finished || p.left || p.ammo >= MAX_AMMO) continue;
         const dx = p.x - k.x, dz = p.z - k.z;
         if (dx * dx + dz * dz < 1.0 && p.y < k.y + 0.6 && p.y + PH > k.y - 0.6) {
           p.ammo = Math.min(MAX_AMMO, p.ammo + 3); k.on = false; k.t = 9; emit('pickup', p); break;
@@ -507,7 +520,7 @@ function create(seed) {
   }
 
   /* ---------------- public step ---------------- */
-  function sub(dt, humanInp) {
+  function sub(dt, humanInp, first) {
     S.t += dt;
     if (S.phase === 'countdown') { S.cd -= dt; if (S.cd <= 0) { S.phase = 'race'; S.raceT = 0; emit('go', null); } }
     else if (S.phase === 'race') S.raceT += dt;
@@ -524,7 +537,10 @@ function create(seed) {
       else p.ground = null;
     }
     for (const p of S.players) {
-      const inp = p._mpInput || (p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY));
+      let inp = p._mpInput || (p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY));
+      if (!first && p._mpInput && (inp.jump || inp.dive || inp.fire)) {
+        inp = { mx: inp.mx, mz: inp.mz, jump: false, dive: false, fire: false };
+      }
       stepPlayer(p, inp || EMPTY, dt);
     }
     separate(); stepBullets(dt); stepPickups(dt);
@@ -532,7 +548,7 @@ function create(seed) {
   S.step = (dt, humanInp) => {
     dt = Math.min(dt, 1 / 20);
     const n = Math.max(1, Math.ceil(dt / (1 / 60))), h = dt / n;
-    for (let i = 0; i < n; i++) sub(h, i === 0 ? humanInp : { mx: humanInp ? humanInp.mx : 0, mz: humanInp ? humanInp.mz : 0 });
+    for (let i = 0; i < n; i++) sub(h, i === 0 ? humanInp : { mx: humanInp ? humanInp.mx : 0, mz: humanInp ? humanInp.mz : 0 }, i === 0);
   };
   return S;
 }

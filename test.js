@@ -1,10 +1,10 @@
-const fs = await import("node:fs");
+const fs = require("node:fs");
 const simSrc = fs.readFileSync("bonk/sim.js", "utf8");
 
 // Mock module for CommonJS
-const module = { exports: {} };
-eval(simSrc);
-const Sim = module.exports;
+const mod = { exports: {} };
+(new Function("module", "exports", simSrc))(mod, mod.exports);
+const Sim = mod.exports;
 
 const sim = Sim.create(12345);
 const p = sim.addPlayer({ name: 'Human', bot: false, kind: 'zombie', skill: 0 });
