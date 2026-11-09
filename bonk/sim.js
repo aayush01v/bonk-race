@@ -178,7 +178,7 @@ function create(seed) {
       x: SLOTS[slot % SLOTS.length], y: 0.02, z: 0.5, vx: 0, vy: 0, vz: 0, yaw: 0, ground: null, coyote: 0, jbuf: 0,
       stun: 0, stunMax: 0, getup: 0, flop: 1, diveT: 0, diveCd: 0, fireCd: 0, hitCd: 0, protect: 0,
       dead: 0, ammo: 0, cp: 0, finished: false, left: false, finishT: 0, place: 0, blocked: false, gvx: 0, gvz: 0,
-      falls: 0, bonks: 0
+      falls: 0, bonks: 0, _pendingFall: false
     });
     p.ai.react = 0.15 + R() * 0.3; p.ai.jcd = p.ai.dcd = p.ai.fcd = 0;
   }
@@ -205,6 +205,7 @@ function create(seed) {
     S.phase = phase || 'menu';
     S.cd = 3;
   };
+  S.solidPose = (id, t) => solidAt(S.solids[id], t, {});
   S.begin = () => S.reset('countdown');
   S.ranking = () => S.players.slice().sort((a, b) =>
     (!!a.left - !!b.left) || (b.finished - a.finished) || (a.finished && b.finished ? a.finishT - b.finishT : b.z - a.z));
@@ -393,7 +394,7 @@ function create(seed) {
     emit('respawn', p);
   }
   function stepPlayer(p, inp, dt) {
-    if (p.left) return;
+    if (p.left || (p._serverLife && (p._pendingFall || p.dead > 0))) return;
     if (p.dead > 0) { p.dead -= dt; if (p.dead <= 0) respawn(p); return; }
     p.coyote -= dt; p.jbuf -= dt; p.diveCd -= dt; p.fireCd -= dt; p.hitCd -= dt; p.protect -= dt;
     if (p.stun > 0) { p.stun -= dt; if (p.stun <= 0) { p.stun = 0; p.getup = 0.35; } }
@@ -458,6 +459,9 @@ function create(seed) {
 
     if (p.y < KILL_Y) {
       if (p.finished) { respawn(p); return; }
+      // Multiplayer prediction must not invent a death, checkpoint respawn or RNG
+      // advance before the server confirms it. Hold until an acknowledged snapshot.
+      if (p._serverLife) { p._pendingFall = true; p.ground = null; return; }
       p.dead = 1.1; p.ground = null; p.stun = 0; p.diveT = 0; p.falls++; emit('fall', p); return;
     }
     if (!p.finished && racing && p.ground && p.z >= S.finishZ) {

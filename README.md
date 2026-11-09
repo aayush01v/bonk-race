@@ -211,3 +211,22 @@ low-end/mobile performance need a browser/device pass.
 
 MIT
 
+
+### Predicted landing and fall recovery
+
+The multiplayer local player predicts movement but does not commit checkpoint
+respawns. An acknowledged server landing can recover a descending local miss
+before the kill plane, while a newer jump or dive is protected. Grounded hard
+corrections preserve the contact point relative to the platform pose instead
+of placing the player at stale world coordinates.
+
+If prediction reaches the kill plane first, it waits for confirmation without
+emitting a false fall notification. A server death triggers the notification
+once, and only a server alive snapshot resumes play. During a network outage,
+a pending fall or confirmed death waits for snapshots rather than inventing a
+local checkpoint respawn. This does not eliminate network delay or guarantee
+that every predicted landing matches the server.
+
+`test_mp_landing.js` executes the generated client's actual state handler and
+covers missed landings, newer jumps, moving-platform correction, stale alive
+snapshots, false falls, confirmed deaths, outage holds, and solo respawns.
