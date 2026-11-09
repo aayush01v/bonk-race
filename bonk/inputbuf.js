@@ -32,17 +32,26 @@ class InputBuffer {
     this.q = [];
     this.cur = { mx: 0, mz: 0, fire: false };
     this.dMin = null; this.lastArr = 0; this.jit = 0; this.buf = BUF_MIN;
-    this.ack = 0; this.active = false;
+    this.ack = 0; this.active = false; this.outliers = 0;
   }
 
   /** @returns {boolean} true if the message was timestamped and queued */
   push(m, nowS) {
     // stamps are the client's performance.now()/1000 (>= 0, days at most); anything else is garbage -> legacy path
-    if (!m || typeof m.t !== 'number' || !(m.t >= 0 && m.t < 1e7)) return false;
+    if (!m || typeof m.t !== 'number' || !isFinite(m.t) || !(m.t >= 0 && m.t < 1e7)) return false;
     const msg = { t: m.t, mx: axis(m.mx), mz: axis(m.mz), fire: !!m.fire, jump: !!m.jump, dive: !!m.dive };
     const d = nowS - m.t;
-    if (this.dMin === null) { this.dMin = d; this.buf = BUF_MIN; }
-    else this.dMin = Math.min(d, this.dMin + DRIFT * Math.max(0, nowS - this.lastArr));
+    if (this.dMin === null) {
+      this.dMin = d; this.buf = BUF_MIN; this.outliers = 0;
+    } else if (d < this.dMin - 5.0 || d > this.dMin + 10.0) {
+      // Guard against a single spoofed/corrupted future or past timestamp pinning dMin forever.
+      // If a client clock genuinely resets (5+ consecutive packets at the new offset), re-anchor.
+      if (++this.outliers < 5) return false;
+      this.dMin = d; this.jit = 0; this.buf = BUF_MIN; this.q.length = 0; this.outliers = 0;
+    } else {
+      this.outliers = 0;
+      this.dMin = Math.min(d, this.dMin + DRIFT * Math.max(0, nowS - this.lastArr));
+    }
     const ex = Math.max(0, d - this.dMin);
     this.jit += (ex - this.jit) * (ex > this.jit ? 0.3 : 0.02);   // fast attack, slow decay (~p90-ish)
     this.lastArr = nowS;

@@ -599,7 +599,7 @@ function buildCourse() {
     const s = Object.assign({
       id: uid++, kind: 'static', shape: 'slab', color: '#ffd23f', yaw: 0,
       vx: 0, vy: 0, vz: 0, om: 0, dyaw: 0, active: true, hazard: false, e: 0,
-      bounce: 0, cp: -1, state: 'idle', timer: 0, fvy: 0
+      bounce: 0, cp: -1, state: 'idle', timer: 0, hold: 1.2, fvy: 0
     }, o);
     s.rad = s.round ? s.hx : hyp(s.hx, s.hz);
     s.b = { cx: s.cx, cy: s.cy, cz: s.cz, yaw: s.yaw };
@@ -725,20 +725,20 @@ function create(seed) {
   const R = mulberry(seed || 7);
   const C = buildCourse();
   const S = {
-    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1,
+    t: 0, raceT: 0, phase: 'menu', cd: 0, finishCount: 0, humanId: 0, bid: 1, grav: GRAV,
     players: [], bullets: [], ev: [],
     solids: C.solids, deco: C.deco, pickups: C.pickups, cps: C.cps, route: C.route,
     finishZ: C.finishZ, length: C.length
   };
   const EMPTY = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
-  const SLOTS = [-4.75, -2.85, -0.95, 0.95, 2.85, 4.75];
+  const SLOTS = [-4.75, -2.85, -0.95, 0.95, 2.85, 4.75, -6.65, 6.65];
   const emit = (t, p, extra) => S.ev.push(Object.assign({ t, id: p ? p.id : -1, x: p ? p.x : 0, y: p ? p.y : 0, z: p ? p.z : 0 }, extra));
 
   function resetPlayer(p, slot) {
     Object.assign(p, {
-      x: SLOTS[slot % 6], y: 0.02, z: 0.5, vx: 0, vy: 0, vz: 0, yaw: 0, ground: null, coyote: 0, jbuf: 0,
+      x: SLOTS[slot % SLOTS.length], y: 0.02, z: 0.5, vx: 0, vy: 0, vz: 0, yaw: 0, ground: null, coyote: 0, jbuf: 0,
       stun: 0, stunMax: 0, getup: 0, flop: 1, diveT: 0, diveCd: 0, fireCd: 0, hitCd: 0, protect: 0,
-      dead: 0, ammo: 0, cp: 0, finished: false, finishT: 0, place: 0, blocked: false, gvx: 0, gvz: 0,
+      dead: 0, ammo: 0, cp: 0, finished: false, left: false, finishT: 0, place: 0, blocked: false, gvx: 0, gvz: 0,
       falls: 0, bonks: 0
     });
     p.ai.react = 0.15 + R() * 0.3; p.ai.jcd = p.ai.dcd = p.ai.fcd = 0;
@@ -768,7 +768,7 @@ function create(seed) {
   };
   S.begin = () => S.reset('countdown');
   S.ranking = () => S.players.slice().sort((a, b) =>
-    (b.finished - a.finished) || (a.finished && b.finished ? a.finishT - b.finishT : b.z - a.z));
+    (!!a.left - !!b.left) || (b.finished - a.finished) || (a.finished && b.finished ? a.finishT - b.finishT : b.z - a.z));
 
   /* ---------------- solids ---------------- */
   function updateSolid(s, dt) {
@@ -786,7 +786,7 @@ function create(seed) {
           s.timer -= dt;
           if (s.timer <= 0) { s.state = 'fall'; s.active = false; s.fvy = 0; s.timer = 1.0; emit('crumble', null, { x: s.cx, y: s.cy, z: s.cz }); }
         } else if (s.state === 'fall') {
-          s.fvy -= GRAV * 0.8 * dt; s.cy += s.fvy * dt; s.timer -= dt;
+          s.fvy -= S.grav * 0.8 * dt; s.cy += s.fvy * dt; s.timer -= dt;
           if (s.timer <= 0) { s.state = 'gone'; s.timer = 0.8; }
         } else if (s.state === 'gone') {
           s.timer -= dt;
@@ -856,7 +856,10 @@ function create(seed) {
       }
       p.gvx = gv[0]; p.gvz = gv[1];
       p.ground = ground; p.y = gtop; if (p.vy < 0) p.vy = 0;
-      if (ground.kind === 'crumble' && ground.state === 'idle') { ground.state = 'shake'; ground.timer = 1.2; emit('shake', null, { x: ground.cx, y: ground.cy, z: ground.cz }); }
+      if (ground.kind === 'crumble' && ground.state === 'idle') {
+        ground.state = 'shake'; ground.timer = ground.hold || 1.2;
+        emit('shake', null, { x: ground.cx, y: ground.cy, z: ground.cz });
+      }
       if (ground.cp > p.cp) { p.cp = ground.cp; emit('cp', p, { cp: p.cp }); }
     } else if (was) { p.vx += p.gvx; p.vz += p.gvz; p.ground = null; }
 
@@ -897,7 +900,7 @@ function create(seed) {
   function think(p, dt) {
     const inp = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
     const A = p.ai;
-    if (S.phase !== 'race' || p.finished || p.dead > 0) return inp;
+    if (S.phase !== 'race' || p.finished || p.left || p.dead > 0) return inp;
     A.react -= dt; A.jcd -= dt; A.dcd -= dt; A.fcd -= dt;
     if (A.react > 0) return inp;
 
@@ -921,14 +924,14 @@ function create(seed) {
     }
     if (p.ground && A.dcd <= 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0) continue;
+        if (q === p || q.dead > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z, d = hyp(dx, dz);
         if (d < 1.9 && Math.abs(wrap(Math.atan2(dx, dz) - p.yaw)) < 0.5 && R() < 0.25 * A.skill) { inp.dive = true; A.dcd = 3.5; break; }
       }
     }
     if (p.ammo > 0 && p.fireCd <= 0 && A.fcd <= 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0 || q.finished) continue;
+        if (q === p || q.dead > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z, d = hyp(dx, dz);
         if (d > 2 && d < 15 && Math.abs(q.y - p.y) < 1.6 && Math.abs(wrap(Math.atan2(dx, dz) - p.yaw)) < 0.16) { inp.fire = true; A.fcd = 1.3 + R(); break; }
       }
@@ -938,6 +941,12 @@ function create(seed) {
 
   /* ---------------- one player ---------------- */
   function respawn(p) {
+    if (p.finished) {
+      p.x = 0; p.z = S.finishZ + 2; p.y = 3.6;
+      p.vx = p.vy = p.vz = 0; p.yaw = 0; p.ground = null; p.protect = 1.5; p.hitCd = 0;
+      p.stun = 0; p.getup = 0; p.diveT = 0;
+      return;
+    }
     const c = S.cps[p.cp];
     p.x = c.x + (R() - 0.5) * 3; p.z = c.z + (R() - 0.5) * 1.5; p.y = c.y + 0.6;
     p.vx = p.vy = p.vz = 0; p.yaw = 0; p.ground = null; p.protect = 1.5; p.hitCd = 0;
@@ -945,6 +954,7 @@ function create(seed) {
     emit('respawn', p);
   }
   function stepPlayer(p, inp, dt) {
+    if (p.left) return;
     if (p.dead > 0) { p.dead -= dt; if (p.dead <= 0) respawn(p); return; }
     p.coyote -= dt; p.jbuf -= dt; p.diveCd -= dt; p.fireCd -= dt; p.hitCd -= dt; p.protect -= dt;
     if (p.stun > 0) { p.stun -= dt; if (p.stun <= 0) { p.stun = 0; p.getup = 0.35; } }
@@ -992,7 +1002,7 @@ function create(seed) {
     // dive bonks whoever it hits
     if (p.diveT > 0) {
       for (const q of S.players) {
-        if (q === p || q.dead > 0 || q.hitCd > 0 || q.protect > 0) continue;
+        if (q === p || q.dead > 0 || q.hitCd > 0 || q.protect > 0 || q.finished || q.left) continue;
         const dx = q.x - p.x, dz = q.z - p.z;
         if (Math.abs(q.y - p.y) < 1.0 && dx * dx + dz * dz < 1.56) {
           knock(q, Math.sin(p.yaw) * 9.5, Math.cos(p.yaw) * 9.5, 5.2, 1.0);
@@ -1002,12 +1012,15 @@ function create(seed) {
       }
     }
 
-    if (!p.ground) p.vy = Math.max(p.vy - GRAV * dt, -MAX_FALL);
+    if (!p.ground) p.vy = Math.max(p.vy - S.grav * dt, -MAX_FALL);
     const prevY = p.y;
     p.x += p.vx * dt; p.z += p.vz * dt; p.y += p.vy * dt;
     collide(p, prevY);
 
-    if (p.y < KILL_Y) { p.dead = 1.1; p.ground = null; p.stun = 0; p.diveT = 0; p.falls++; emit('fall', p); return; }
+    if (p.y < KILL_Y) {
+      if (p.finished) { respawn(p); return; }
+      p.dead = 1.1; p.ground = null; p.stun = 0; p.diveT = 0; p.falls++; emit('fall', p); return;
+    }
     if (!p.finished && racing && p.ground && p.z >= S.finishZ) {
       p.finished = true; p.finishT = S.raceT; p.place = ++S.finishCount; emit('finish', p, { place: p.place });
     }
@@ -1017,7 +1030,7 @@ function create(seed) {
     const P = S.players;
     for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
       const a = P[i], b = P[j];
-      if (a.dead > 0 || b.dead > 0 || Math.abs(a.y - b.y) > PH * 0.75) continue;
+      if (a.dead > 0 || b.dead > 0 || a.left || b.left || Math.abs(a.y - b.y) > PH * 0.75) continue;
       let dx = a.x - b.x, dz = a.z - b.z;
       const d = hyp(dx, dz), md = PR * 2;
       if (d >= md) continue;
@@ -1041,7 +1054,7 @@ function create(seed) {
         if (footprint(s, b.x, b.z).d < 0.15) { dead = true; emit('spark', null, { x: b.x, y: b.y, z: b.z }); break; }
       }
       if (!dead) for (const q of S.players) {
-        if (q.id === b.owner || q.dead > 0 || q.protect > 0) continue;
+        if (q.id === b.owner || q.dead > 0 || q.hitCd > 0 || q.protect > 0 || q.finished || q.left) continue;
         const dx = q.x - b.x, dz = q.z - b.z;
         if (b.y > q.y && b.y < q.y + PH && dx * dx + dz * dz < (PR + 0.22) * (PR + 0.22)) {
           knock(q, b.vx * 0.3, b.vz * 0.3, 5.5, 0.9);
@@ -1058,7 +1071,7 @@ function create(seed) {
     for (const k of S.pickups) {
       if (!k.on) { k.t -= dt; if (k.t <= 0) k.on = true; continue; }
       for (const p of S.players) {
-        if (p.dead > 0 || p.finished || p.ammo >= MAX_AMMO) continue;
+        if (p.dead > 0 || p.finished || p.left || p.ammo >= MAX_AMMO) continue;
         const dx = p.x - k.x, dz = p.z - k.z;
         if (dx * dx + dz * dz < 1.0 && p.y < k.y + 0.6 && p.y + PH > k.y - 0.6) {
           p.ammo = Math.min(MAX_AMMO, p.ammo + 3); k.on = false; k.t = 9; emit('pickup', p); break;
@@ -1068,7 +1081,7 @@ function create(seed) {
   }
 
   /* ---------------- public step ---------------- */
-  function sub(dt, humanInp) {
+  function sub(dt, humanInp, first) {
     S.t += dt;
     if (S.phase === 'countdown') { S.cd -= dt; if (S.cd <= 0) { S.phase = 'race'; S.raceT = 0; emit('go', null); } }
     else if (S.phase === 'race') S.raceT += dt;
@@ -1085,7 +1098,10 @@ function create(seed) {
       else p.ground = null;
     }
     for (const p of S.players) {
-      const inp = p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY);
+      let inp = p._mpInput || (p.id === S.humanId ? humanInp : (p.bot ? think(p, dt) : EMPTY));
+      if (!first && p._mpInput && (inp.jump || inp.dive || inp.fire)) {
+        inp = { mx: inp.mx, mz: inp.mz, jump: false, dive: false, fire: false };
+      }
       stepPlayer(p, inp || EMPTY, dt);
     }
     separate(); stepBullets(dt); stepPickups(dt);
@@ -1093,7 +1109,7 @@ function create(seed) {
   S.step = (dt, humanInp) => {
     dt = Math.min(dt, 1 / 20);
     const n = Math.max(1, Math.ceil(dt / (1 / 60))), h = dt / n;
-    for (let i = 0; i < n; i++) sub(h, i === 0 ? humanInp : { mx: humanInp ? humanInp.mx : 0, mz: humanInp ? humanInp.mz : 0 });
+    for (let i = 0; i < n; i++) sub(h, i === 0 ? humanInp : { mx: humanInp ? humanInp.mx : 0, mz: humanInp ? humanInp.mz : 0 }, i === 0);
   };
   return S;
 }
@@ -1343,7 +1359,9 @@ function groundBelow(x, z, maxY) {
     const dx = x - s.cx, dz = z - s.cz, rr2 = s.rad + 0.3;
     if (dx * dx + dz * dz > rr2 * rr2) continue;
     const c = Math.cos(s.yaw), n = Math.sin(s.yaw);
-    if (Math.abs(dx * c - dz * n) <= s.hx + 0.1 && Math.abs(dx * n + dz * c) <= s.hz + 0.1 && (best === null || top > best)) best = top;
+    const lx = dx * c - dz * n, lz = dx * n + dz * c;
+    const inside = s.round ? Math.hypot(lx, lz) <= s.hx + 0.1 : (Math.abs(lx) <= s.hx + 0.1 && Math.abs(lz) <= s.hz + 0.1);
+    if (inside && (best === null || top > best)) best = top;
   }
   return best;
 }
@@ -1443,7 +1461,7 @@ function buildDots() {
   el.track.textContent = '';
   dots = sim.players.map(p => {
     const d = document.createElement('div');
-    d.className = 'dot' + (p.id === me ? ' me' : ''); d.style.setProperty('--c', KINDS[p.kind].c);
+    d.className = 'dot' + (p.id === me ? ' me' : ''); d.style.setProperty('--c', (KINDS[p.kind] || KINDS.zombie).c);
     el.track.appendChild(d); return d;
   });
 }
@@ -1454,14 +1472,14 @@ function updateHud() {
   setText(el.placeOf, counting ? '' : '/ ' + sim.players.length);
   setText(el.timer, fmt(p.finished ? p.finishT : Math.max(0, sim.raceT)));
   for (let i = 0; i < pips.length; i++) pips[i].classList.toggle('on', i < p.ammo);
-  for (const q of sim.players) dots[q.id].style.left = (clamp(q.z / sim.finishZ, 0, 1) * 100).toFixed(1) + '%';
+  for (const q of sim.players) if (dots[q.id]) dots[q.id].style.left = (clamp(q.z / sim.finishZ, 0, 1) * 100).toFixed(1) + '%';
 }
 function fillResList() {
   const ul = el.resList; ul.textContent = '';
   sim.ranking().forEach((q, i) => {
     const li = document.createElement('li'); if (q.id === me) li.className = 'me';
     const a = document.createElement('span'); a.textContent = i + 1;
-    const d = document.createElement('i'); d.style.setProperty('--c', KINDS[q.kind].c);
+    const d = document.createElement('i'); d.style.setProperty('--c', (KINDS[q.kind] || KINDS.zombie).c);
     const n = document.createElement('span'); n.textContent = q.id === me ? 'You' : q.name;
     const t = document.createElement('em'); t.textContent = q.finished ? fmt(q.finishT) : 'racing...';
     li.append(a, d, n, t); ul.appendChild(li);
@@ -1511,6 +1529,7 @@ function goMenu() {
   });
 })();
 function pick(id) {
+  if (!KINDS[id]) id = 'zombie';
   myKind = id; sim = null;
   document.querySelectorAll('.chip').forEach(b => b.setAttribute('aria-checked', String(b.dataset.k === id)));
   setText($('pickName'), KINDS[id].name);
@@ -1598,6 +1617,7 @@ const snapBuf = [];   // raw server 'state' snapshots, oldest first
 let netMine = null;   // last server sample of my player (correction target)
 let netMineDead = false, lastNetPhase = '', needHardSnapMe = false;
 let simAcc = 0, lastSentInp = null, lastSentAt = 0, lastInpAt = 0;
+let lastDiveStamp = 0, lastFireStamp = 0, lastPickupStamp = 0;
 // lastInpAt: sim time of the last REAL input (change or pulse) — the keep-alive
 // resend doesn't re-arm it. Drives the input-confirmation window in applyNet:
 // until the server has had uplink time to receive it and broadcast it, no state
@@ -1635,6 +1655,7 @@ function resetNet() {
   snapBuf.length = 0;
   netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
   simAcc = 0; lastSentInp = null; lastSentAt = 0; lastInpAt = 0;
+  lastDiveStamp = 0; lastFireStamp = 0; lastPickupStamp = 0;
   interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
   evQueue.length = 0;
   netStats.snaps = 0; netStats.gaps.length = 0; netStats.corr = 0; netStats.lastStateNow = 0;
@@ -1700,6 +1721,8 @@ function sendMPInput(input, stampT) {
   const now = performance.now();
   const l = lastSentInp;
   const changed = !l || input.mx !== l.mx || input.mz !== l.mz || input.fire !== l.fire;
+  if (input.dive) lastDiveStamp = stampT;
+  if (input.fire) lastFireStamp = stampT;
   if (changed || input.jump || input.dive || now - lastSentAt >= 100) {
     // re-arm the confirmation window only for real new inputs; the 100 ms
     // keep-alive resend carries no new information for the server
@@ -1957,6 +1980,16 @@ function update(dt, t) {
         r.p.x = r.x; r.p.y = r.y; r.p.z = r.z;
         r.p.vx = r.vx; r.p.vy = r.vy; r.p.vz = r.vz; r.p.yaw = r.yaw;
       }
+      // record local pickup/shake timestamps so stale snapshots don't re-trigger them
+      for (let i = 0; i < sim.ev.length; i++) {
+        const ev = sim.ev[i];
+        if (ev.t === 'pickup' && ev.id === me) {
+          lastPickupStamp = stampT;
+          for (const k of sim.pickups) if (!k.on && !k._localOffAt) k._localOffAt = stampT;
+        } else if (ev.t === 'shake') {
+          for (const s of sim.solids) if (s.kind === 'crumble' && s.state === 'shake' && !s._shakeAt) s._shakeAt = stampT;
+        }
+      }
     } else {
       sim.step(dt, input);
     }
@@ -2034,7 +2067,12 @@ function drawScene(t) {
   for (let i = 0; i < S.length; i++) {
     const s = S[i]; if (s.state === 'gone') continue;
     const j = s.state === 'shake' ? Math.sin(t * 90 + i * 1.7) * 0.07 : 0;
-    hull(s.cx + j, s.cy, s.cz, s.hx * 2, s.hy * 2, s.hz * 2, s.yaw, s.shape === 'bar' ? 0.06 : 0.08);
+    if (s.round) {
+      push(); translate(s.cx + j, s.cy, s.cz); if (s.yaw) rotY(s.yaw);
+      scale(s.hx + 0.08, s.hy * 2 + 0.16, s.hz + 0.08); draw(M.cyl, BLACK, 0, INK); pop();
+    } else {
+      hull(s.cx + j, s.cy, s.cz, s.hx * 2, s.hy * 2, s.hz * 2, s.yaw, s.shape === 'bar' ? 0.06 : 0.08);
+    }
   }
   for (const d of sim.deco) if (d.shape === 'hub') part(M.cyl, d.x, d.y + 0.78, d.z, 0.7, 1.6, 0.7, BLACK, INK);
   hull(-7.6, world.finishTop + 2.3, fz + 0.9, 0.8, 7.2, 0.8, 0, 0.07); hull(7.6, world.finishTop + 2.3, fz + 0.9, 0.8, 7.2, 0.8, 0, 0.07);
@@ -2052,7 +2090,12 @@ function drawScene(t) {
       case 'pad': em = PAD_EM; sy *= 1 + 0.16 * Math.sin(t * 7); break;
     }
     if (s.state === 'shake') col = [Math.min(1, col[0] * 1.1 + 0.12), col[1] * 0.78, col[2] * 0.7];
-    box(s.cx + j, s.cy, s.cz, s.hx * 2, sy, s.hz * 2, s.yaw, col, pat, em);
+    if (s.round) {
+      push(); translate(s.cx + j, s.cy, s.cz); if (s.yaw) rotY(s.yaw);
+      scale(s.hx, sy, s.hz); draw(M.cyl, col, pat, em, s.hx * 2, sy, s.hz * 2); pop();
+    } else {
+      box(s.cx + j, s.cy, s.cz, s.hx * 2, sy, s.hz * 2, s.yaw, col, pat, em);
+    }
     if (s.kind === 'piston') {
       const hx = s.b.cx - s.dir * 1.2, len = Math.abs(s.cx - hx);
       box((hx + s.cx) / 2, s.cy, s.cz, len, 0.28, 0.28, 0, ROD, 0, null);
@@ -2198,6 +2241,7 @@ document.addEventListener('visibilitychange', () => { last = performance.now(); 
 
 if (isMP) {
   $('menu').classList.add('hidden');
+  $('btnRestart').classList.add('hidden');
   if (netOn) {
     const n = document.createElement('div');
     n.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:60;font:11px/1.4 monospace;color:#9fe8c8;background:rgba(10,14,18,.65);padding:4px 8px;border-radius:6px;pointer-events:none';
@@ -2214,6 +2258,7 @@ if (isMP) {
       audioInit();
       me = d.simPlayerId;
       myKind = d.roster.find(p => p.id === me)?.kind || 'zombie';
+      if (!KINDS[myKind]) myKind = 'zombie';
       sim = Sim.create(d.seed);
       sim.__mpSeed = d.seed;
       sim.bid = 1e6;  // my local bullet ids: keep them out of the server's id range
@@ -2221,9 +2266,15 @@ if (isMP) {
       // Apply room settings to matching objects (the server applies the same
       // changes in startRace — keep this list in lockstep with it)
       if (d.settings) {
+        if (d.settings.gravity !== undefined && isFinite(d.settings.gravity)) {
+          sim.grav = Sim.K.GRAV * d.settings.gravity;
+        }
         for (const s of sim.solids) {
           if (s.kind === 'spin' && d.settings.spinnerSpeed !== undefined) s.om *= d.settings.spinnerSpeed;
-          if (s.kind === 'crumble' && d.settings.crumbleHold !== undefined) s.timer = d.settings.crumbleHold;
+          if (s.kind === 'crumble' && d.settings.crumbleHold !== undefined) {
+            s.hold = d.settings.crumbleHold;
+            s.timer = d.settings.crumbleHold;
+          }
           if (s.bounce && d.settings.bounceForce !== undefined) s.bounce = d.settings.bounceForce;
         }
       }
@@ -2231,7 +2282,7 @@ if (isMP) {
       // Build full player objects via addPlayer so bot AI (p.ai) and all timers
       // (diveCd, fireCd, coyote, jbuf, ...) exist — a hand-built object breaks
       // the local sim (bots crash in think(), first dive/fire never fires).
-      for (const r of d.roster) sim.addPlayer({ name: r.name, bot: r.bot, kind: r.kind, skill: r.bot ? 0.8 : 0 });
+      for (const r of d.roster) sim.addPlayer({ name: r.name, bot: r.bot, kind: KINDS[r.kind] ? r.kind : 'zombie', skill: r.bot ? 0.8 : 0 });
       // remotes run on neutral local input: their motion is the interpolated network
       // state, so local bot think()/fires/jumps can't desync or double-fire events
       for (let i = 0; i < sim.players.length; i++) if (i !== me) sim.players[i]._mpInput = NEUTRAL;
@@ -2247,6 +2298,7 @@ if (isMP) {
       P.life.fill(0);
       mode = 'play'; cam.init = false; cam.shake = 0; lastN = 0; resultsAt = 0; resultsShown = false;
       clearInput();
+      $('results').classList.add('hidden');
       $('hud').classList.remove('hidden');
       $('touch').classList.toggle('hidden', !touchOn);
       veilOn = false; $('veil').classList.remove('on'); $('count').textContent = ''; $('ammo').classList.remove('hidden');
@@ -2257,7 +2309,7 @@ if (isMP) {
     }
     else if (e.data.type === 'mp_state' && sim) {
       const s = decodeState(e.data.data);  // compact wire arrays → legacy shape
-      const now = performance.now();
+      const now = performance.now(), nowS = now / 1000;
       if (netStats.lastStateNow) netStats.gaps.push(now - netStats.lastStateNow);
       if (netStats.gaps.length > 60) netStats.gaps.shift();
       netStats.lastStateNow = now;
@@ -2267,34 +2319,76 @@ if (isMP) {
       while (snapBuf.length > 2 && s.t - snapBuf[0].t > BUF_AGE) snapBuf.shift();
       // soft clock alignment: record the smoothed server/client clock offset;
       // applyNet() eases sim.t toward it instead of hard-snapping the whole scene
-      const off = s.t - now / 1000;
+      const off = s.t - nowS;
       srvOffset = srvOffset === null ? off : srvOffset + (off - srvOffset) * 0.1;
       updateDelayTarget();
-      sim.phase = s.phase; sim.cd = s.cd; sim.finishCount = s.finishCount;
-      if (s.phase !== lastNetPhase) { lastNetPhase = s.phase; needHardSnapMe = true; }
+      // Never regress phase from 'race' back to 'countdown' on a slightly late snapshot
+      if (!(sim.phase === 'race' && s.phase === 'countdown')) {
+        sim.phase = s.phase; sim.cd = s.cd;
+      }
+      sim.finishCount = s.finishCount;
+      if (s.phase !== lastNetPhase) {
+        const expectedGo = lastNetPhase === 'countdown' && s.phase === 'race';
+        lastNetPhase = s.phase;
+        if (!expectedGo) needHardSnapMe = true;
+      }
+      const mySp = s.players[me];
+      const myAck = mySp && mySp.ack > 0 ? mySp.ack : 0;
+      const unackedWin = netStats.rtt > 0 ? netStats.rtt / 1000 + 0.15 : 0.35;
       for (let i = 0; i < s.players.length; i++) {
         const p = sim.players[i], sp = s.players[i];
         if (!p || !sp) continue;
 
-        p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
-        p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
-        p.place = sp.place; p.falls = sp.falls; p.bonks = sp.bonks;
-
         if (i === me) {
           const dead = sp.dead > 0;
           if (dead !== netMineDead) { netMineDead = dead; needHardSnapMe = true; }  // fall/respawn
+          p.dead = sp.dead; p.protect = sp.protect;
+          p.falls = sp.falls; p.bonks = sp.bonks;
+          // Checkpoints and finish are monotonic within a race: never regress them on stale snapshots
+          p.cp = Math.max(p.cp, sp.cp);
+          if (sp.finished) {
+            p.finished = true; p.finishT = sp.finishT; p.place = sp.place;
+          } else if (!p.finished) {
+            p.place = sp.place;
+          }
+          // Protect local dive and ammo during the unacknowledged input window
+          const diveUnacked = lastDiveStamp > 0 && (myAck > 0 ? myAck < lastDiveStamp + 0.05 : (nowS - lastDiveStamp) < unackedWin);
+          const diveJustEnded = lastDiveStamp > 0 && p.diveT <= 0 && (nowS - lastDiveStamp) < unackedWin + 0.6;
+          if (!diveUnacked && !(diveJustEnded && sp.diveT > 0)) {
+            p.diveT = sp.diveT;
+          }
+          if (sp.stun > 0.55 || (!diveUnacked && !diveJustEnded)) {
+            p.stun = sp.stun;
+          }
+          const actStamp = Math.max(lastFireStamp, lastPickupStamp);
+          const ammoUnacked = actStamp > 0 && (myAck > 0 ? myAck < actStamp + 0.05 : (nowS - actStamp) < unackedWin);
+          if (!ammoUnacked) p.ammo = sp.ammo;
+
           // position correction happens in applyNet(); keep the last server sample as target
           netMine = { x: sp.x, y: sp.y, z: sp.z, yaw: sp.yaw, vx: sp.vx, vy: sp.vy, vz: sp.vz, ground: sp.ground, t: s.t };  // (reconcileOwn reads sp.ack)
-          reconcileOwn(s, sp, now / 1000);
+          reconcileOwn(s, sp, nowS);
+        } else {
+          p.stun = sp.stun; p.diveT = sp.diveT; p.dead = sp.dead; p.protect = sp.protect;
+          p.ammo = sp.ammo; p.cp = sp.cp; p.finished = sp.finished; p.finishT = sp.finishT;
+          p.place = sp.place; p.falls = sp.falls; p.bonks = sp.bonks;
         }
         // remotes: pos/vel/yaw are set by applyNet() from the interpolation buffer
       }
       for (const st of s.tiles) {
         const tl = sim.solids[st.id];
-        if (tl) { tl.state = st.state; tl.active = st.active; }
+        if (!tl) continue;
+        if (st.state === 'idle' && tl.state === 'shake' && tl._shakeAt && (nowS - tl._shakeAt) < unackedWin + 0.3) continue;
+        if (st.state === 'idle') tl._shakeAt = 0;
+        tl.state = st.state; tl.active = st.active;
       }
       // sim.bullets: my bullets stay local; remotes are rebuilt by applyNet() from snapBuf
-      for (let i = 0; i < s.pickups.length; i++) if (sim.pickups[i]) sim.pickups[i].on = s.pickups[i].on;
+      for (let i = 0; i < s.pickups.length; i++) {
+        const pk = sim.pickups[i];
+        if (!pk) continue;
+        if (s.pickups[i].on && !pk.on && pk._localOffAt && (nowS - pk._localOffAt) < unackedWin + 0.3) continue;
+        if (!s.pickups[i].on) pk._localOffAt = 0;
+        pk.on = s.pickups[i].on;
+      }
     }
     else if (e.data.type === 'mp_events' && sim) {
       // Remotes run on neutral local input, so their active effects never fire locally:
@@ -2324,4 +2418,3 @@ window.__race = { get sim() { return sim; }, get mode() { return mode; }, get me
 </script>
 </body>
 </html>
-

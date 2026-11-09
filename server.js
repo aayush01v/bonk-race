@@ -11,6 +11,7 @@ const url = require('url');
 const PORT = parseInt(process.env.PORT || '8000', 10);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = path.resolve(__dirname);
+const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -42,8 +43,15 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const parsedUrl = url.parse(req.url);
-  let pathname = decodeURIComponent(parsedUrl.pathname);
+  let pathname;
+  try {
+    const parsedUrl = url.parse(req.url);
+    pathname = decodeURIComponent(parsedUrl.pathname || '/');
+  } catch (_) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('400 Bad Request');
+    return;
+  }
 
   if (pathname === '/' || pathname === '') {
     pathname = '/index.html';
@@ -52,7 +60,7 @@ const server = http.createServer((req, res) => {
   const filePath = path.normalize(path.join(ROOT, pathname));
 
   // Security: prevent path traversal outside root
-  if (!filePath.startsWith(ROOT)) {
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     res.end('403 Forbidden');
     return;
@@ -63,7 +71,7 @@ const server = http.createServer((req, res) => {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(`<!doctype html><html><body style="font-family:sans-serif;padding:30px;background:#cfeaff;color:#2a1a5e">
         <h2>404 Not Found</h2>
-        <p>The requested file <code>${pathname}</code> was not found.</p>
+        <p>The requested file <code>${escHtml(pathname)}</code> was not found.</p>
         <p><a href="/" style="font-weight:bold;color:#2a1a5e">Return to Game Launcher</a></p>
       </body></html>`);
       return;

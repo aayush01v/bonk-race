@@ -262,7 +262,7 @@ function glowOnly(m) { if (glowLayer) tryFx('glowMesh', () => glowLayer.addInclu
 
 function disposeWorld() {
   for (const m of W.fixed) m.dispose();
-  for (const e of W.solids) { e.mesh.dispose(); if (e.rod) e.rod.dispose(); }
+  for (const e of W.solids) { e.mesh.dispose(); if (e.rod) e.rod.dispose(); if (e.ownMat && e.ownMat.dispose) e.ownMat.dispose(); }
   for (const e of W.deco) e.mesh.dispose();
   for (const c of W.clouds) c.mesh.dispose();
   for (const f of W.flags) { f.pole.dispose(); f.cloth.dispose(); }
@@ -274,22 +274,22 @@ function buildWorld(sim, world) {
   disposeWorld();
   sim.solids.forEach((s, i) => {
     const col = rgb(s.color);
-    let mesh, mat = matVC, pat = null, freeze = false;
+    let mesh, mat = matVC, ownMat = null, pat = null, freeze = false;
     switch (s.shape) {
       case 'slab': case 'mover': case 'tile': pat = 'checker'; break;
       case 'bar': case 'piston': pat = 'stripes'; break;
     }
     if (s.shape === 'disc') mesh = toMesh('disc' + i, discGeo(s.hx, s.hy, col), matVC);
-    else if (s.shape === 'pad') mesh = toMesh('pad' + i, boxGeo(s.hx, s.hy, s.hz, WHITE, null), stdMat('pad' + i, col, PAD_EM));
+    else if (s.shape === 'pad') { ownMat = stdMat('pad' + i, col, PAD_EM); mesh = toMesh('pad' + i, boxGeo(s.hx, s.hy, s.hz, WHITE, null), ownMat); }
     else mesh = toMesh(s.shape + i, boxGeo(s.hx, s.hy, s.hz, col, pat), mat);
-    if (s.kind === 'crumble') mesh.material = stdMat('tile' + i, WHITE);      // own material so the tint can change
+    if (s.kind === 'crumble') { ownMat = stdMat('tile' + i, WHITE); mesh.material = ownMat; }      // own material so the tint can change
     mesh.receiveShadows = !!shadowGen;
     if (s.shape === 'bar' || s.shape === 'piston') addCaster(mesh);
     if (s.shape === 'pad') glowOnly(mesh);
     mesh.position.set(s.cx, s.cy, s.cz); mesh.rotation.y = s.yaw;
     freeze = s.kind === 'static' && s.shape !== 'pad';
     if (freeze) mesh.freezeWorldMatrix();
-    const e = { i, mesh, freeze, on: true, rod: null, tint: 0 };
+    const e = { i, mesh, ownMat, freeze, on: true, rod: null, tint: 0 };
     if (s.kind === 'piston') {
       e.rod = toMesh('rod' + i, boxGeo(0.5, 0.5, 0.5, ROD, null), matVC);
       e.rod.scaling.set(1, 0.28, 0.28);
@@ -563,6 +563,12 @@ API.actors = (sim, t, me, vis, KINDS, mode, groundBelow) => {
       }
     }
     setOn(r, 'blobShown', r.blob, blobOn);
+  }
+  for (let i = sim.players.length; i < rigs.length; i++) {
+    if (rigs[i]) {
+      setOn(rigs[i], 'shown', rigs[i].root, false);
+      setOn(rigs[i], 'blobShown', rigs[i].blob, false);
+    }
   }
   // marker above the human racer
   const p = sim.players[me];

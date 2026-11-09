@@ -44,6 +44,9 @@ const STATE_EVERY = 1;           // broadcast state every Nth tick (30/1 = 30 Hz
 const MAX_ROOMS  = 50;
 const MAX_PLAYERS_PER_ROOM = 8;
 const ROOM_CODE_LEN = 5;
+const VALID_KINDS = new Set(['zombie', 'pumpkin', 'ghost', 'robot', 'gum', 'banana']);
+const validKind = k => (VALID_KINDS.has(k) ? k : 'zombie');
+const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 /* ─── MIME types ─── */
 const MIME = {
@@ -116,11 +119,13 @@ class Room {
     this.clients.delete(playerId);
     console.log(`[Room ${this.code}] player left, ${this.clients.size} remain`);
 
-    // if a race is live, freeze the leaver as finished so their ghost
-    // doesn't stand on the track
+    // if a race is live, mark the leaver as left/dead (not finished!) so their ghost
+    // disappears from the track and they don't win 1st place with an early finishT
     if (leaving && this.sim && leaving.simPlayerId >= 0) {
       const p = this.sim.players[leaving.simPlayerId];
-      if (p && !p.finished) { p.finished = true; p.finishT = this.sim.raceT; }
+      if (p && !p.finished) {
+        p.left = true; p.dead = 1e9; p.ground = null; p.vx = p.vy = p.vz = 0;
+      }
     }
 
     if (this.clients.size === 0) {
@@ -174,10 +179,25 @@ class Room {
     });
   }
 
-  /* ── settings update (host only) ── */
+  /* ── settings update (host only, allowed in lobby and post-race results) ── */
   updateSettings(playerId, newSettings) {
-    if (playerId !== this.hostId || this.state !== 'lobby') return;
-    Object.assign(this.settings, newSettings);
+    if (playerId !== this.hostId || (this.state !== 'lobby' && this.state !== 'results')) return;
+    if (newSettings && typeof newSettings === 'object') {
+      if (typeof newSettings.maxPlayers === 'number' && isFinite(newSettings.maxPlayers))
+        this.settings.maxPlayers = Math.max(2, Math.min(MAX_PLAYERS_PER_ROOM, Math.round(newSettings.maxPlayers)));
+      if (typeof newSettings.botCount === 'number' && isFinite(newSettings.botCount))
+        this.settings.botCount = Math.max(0, Math.min(MAX_PLAYERS_PER_ROOM - 1, Math.round(newSettings.botCount)));
+      if (typeof newSettings.botSkill === 'number' && isFinite(newSettings.botSkill))
+        this.settings.botSkill = Math.max(0.1, Math.min(1.0, newSettings.botSkill));
+      if (typeof newSettings.spinnerSpeed === 'number' && isFinite(newSettings.spinnerSpeed))
+        this.settings.spinnerSpeed = Math.max(0.1, Math.min(5.0, newSettings.spinnerSpeed));
+      if (typeof newSettings.crumbleHold === 'number' && isFinite(newSettings.crumbleHold))
+        this.settings.crumbleHold = Math.max(0.1, Math.min(10.0, newSettings.crumbleHold));
+      if (typeof newSettings.bounceForce === 'number' && isFinite(newSettings.bounceForce))
+        this.settings.bounceForce = Math.max(1.0, Math.min(60.0, newSettings.bounceForce));
+      if (typeof newSettings.gravity === 'number' && isFinite(newSettings.gravity))
+        this.settings.gravity = Math.max(0.1, Math.min(5.0, newSettings.gravity));
+    }
     this.broadcastLobby();
   }
 
@@ -201,9 +221,15 @@ class Room {
     this.sim = Sim.create(this.seed);
 
     if (this.settings) {
+      if (this.settings.gravity !== undefined && isFinite(this.settings.gravity)) {
+        this.sim.grav = Sim.K.GRAV * this.settings.gravity;
+      }
       for (const s of this.sim.solids) {
         if (s.kind === 'spin' && this.settings.spinnerSpeed !== undefined) s.om *= this.settings.spinnerSpeed;
-        if (s.kind === 'crumble' && this.settings.crumbleHold !== undefined) s.timer = this.settings.crumbleHold;
+        if (s.kind === 'crumble' && this.settings.crumbleHold !== undefined) {
+          s.hold = this.settings.crumbleHold;
+          s.timer = this.settings.crumbleHold;
+        }
         if (s.bounce && this.settings.bounceForce !== undefined) s.bounce = this.settings.bounceForce;
       }
     }
@@ -212,16 +238,16 @@ class Room {
     const KINDS = ['zombie', 'pumpkin', 'ghost', 'robot', 'gum', 'banana'];
     let slot = 0;
     for (const c of this.clients.values()) {
-      const p = this.sim.addPlayer({ name: c.name, bot: false, kind: c.kind || 'zombie', skill: 0 });
+      const p = this.sim.addPlayer({ name: c.name, bot: false, kind: validKind(c.kind), skill: 0 });
       c.simPlayerId = p.id;
       c.ib.reset();
       c.input = { mx: 0, mz: 0, jump: false, dive: false, fire: false };
       slot++;
     }
 
-    // add bots
-    const botSkills = [0.6, 0.72, 0.82, 0.88, 0.66, 0.78, 0.70, 0.84];
-    for (let i = 0; i < this.settings.botCount && slot < MAX_PLAYERS_PER_ROOM; i++, slot++) {
+    // add bots (respecting both maxPlayers and MAX_PLAYERS_PER_ROOM)
+    const maxSlots = Math.min(this.settings.maxPlayers || MAX_PLAYERS_PER_ROOM, MAX_PLAYERS_PER_ROOM);
+    for (let i = 0; i < this.settings.botCount && slot < maxSlots; i++, slot++) {
       const kind = KINDS[(slot + i) % KINDS.length];
       this.sim.addPlayer({
         name: 'Bot ' + (i + 1),
@@ -255,10 +281,11 @@ class Room {
     // tick, so packets are always exactly N sim ticks apart in sim time
     // (the client can interpolate) even when wall-clock firing jitters
     if (this.tickIv) clearTimeout(this.tickIv);
+    if (this.raceEndTimer) { clearTimeout(this.raceEndTimer); this.raceEndTimer = null; }
     this.tickCount = 0;
     this.startTicker();
 
-    console.log(`[Room ${this.code}] race started with ${this.sim.players.length} players (${this.clients.size} human, ${this.settings.botCount} bots)`);
+    console.log(`[Room ${this.code}] race started with ${this.sim.players.length} players (${this.clients.size} human, ${this.sim.players.length - this.clients.size} bots)`);
   }
 
   /* ── deadline-based ticker ──
@@ -331,7 +358,7 @@ class Room {
 
     // check for race end
     if (this.state === 'racing') {
-      const allFinished = this.sim.players.every(p => p.finished);
+      const allFinished = this.sim.players.every(p => p.finished || p.left);
       const humansDone = [...this.clients.values()].every(c => {
         const p = this.sim.players[c.simPlayerId];
         return p && p.finished;
@@ -424,8 +451,8 @@ class Room {
     // stamped input (t = the client's monotonic clock, s): buffered + validated by InputBuffer
     if (c.ib.push(input, nowS())) return;
     // legacy un-stamped client: apply immediately (last input wins)
-    c.input.mx = typeof input.mx === 'number' ? Math.max(-1, Math.min(1, input.mx)) : 0;
-    c.input.mz = typeof input.mz === 'number' ? Math.max(-1, Math.min(1, input.mz)) : 0;
+    c.input.mx = typeof input.mx === 'number' && isFinite(input.mx) ? Math.max(-1, Math.min(1, input.mx)) : 0;
+    c.input.mz = typeof input.mz === 'number' && isFinite(input.mz) ? Math.max(-1, Math.min(1, input.mz)) : 0;
     if (input.jump) c.input.jump = true;
     if (input.dive) c.input.dive = true;
     c.input.fire = !!input.fire;
@@ -460,16 +487,18 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  let pathname = decodeURIComponent(url.parse(req.url).pathname);
+  let pathname;
+  try { pathname = decodeURIComponent(url.parse(req.url).pathname || '/'); }
+  catch (_) { res.writeHead(400); res.end('400'); return; }
   if (pathname === '/' || pathname === '') pathname = '/index.html';
 
   const filePath = path.normalize(path.join(ROOT, pathname));
-  if (!filePath.startsWith(ROOT)) { res.writeHead(403); res.end('403'); return; }
+  if (filePath !== ROOT && !filePath.startsWith(ROOT + path.sep)) { res.writeHead(403); res.end('403'); return; }
 
   fs.stat(filePath, (err, stats) => {
     if (err || !stats.isFile()) {
       res.writeHead(404, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<h2>404</h2><p>${pathname} not found</p><p><a href="/">Home</a></p>`);
+      res.end(`<h2>404</h2><p>${escHtml(pathname)} not found</p><p><a href="/">Home</a></p>`);
       return;
     }
     const ext = path.extname(filePath).toLowerCase();
@@ -505,7 +534,7 @@ wss.on('connection', (ws) => {
       /* ── identity ── */
       case 'setName':
         client.name = String(msg.name || 'Player').slice(0, 20);
-        client.kind = msg.kind || 'zombie';
+        client.kind = validKind(msg.kind);
         ws.send(JSON.stringify({ type: 'welcome', playerId: client.playerId, name: client.name }));
         break;
 
@@ -575,7 +604,7 @@ wss.on('connection', (ws) => {
 
       /* ── update character ── */
       case 'kind':
-        client.kind = msg.kind || 'zombie';
+        client.kind = validKind(msg.kind);
         const kr = rooms.get(client.roomCode);
         if (kr) kr.broadcastLobby();
         break;
