@@ -230,3 +230,13 @@ that every predicted landing matches the server.
 `test_mp_landing.js` executes the generated client's actual state handler and
 covers missed landings, newer jumps, moving-platform correction, stale alive
 snapshots, false falls, confirmed deaths, outage holds, and solo respawns.
+
+### High-refresh input prediction
+
+Multiplayer jump/dive taps are sent immediately and retained locally until the
+next 60 Hz physics tick. Rendering at 90/120/144 Hz can produce frames with no
+physics tick; those frames must not discard taps that the server already received.
+Catch-up frames consume each tap only once. Blur, input reset and race reset clear
+pending local taps. `test_mp_input_frames.js` exercises the actual generated
+frame loop across render rates and tap phases, checking both network delivery
+and local jump/dive events.

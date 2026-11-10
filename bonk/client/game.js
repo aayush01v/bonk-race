@@ -247,7 +247,7 @@ function groundBelow(x, z, maxY) {
 /* ---------------- input ---------------- */
 const keys = Object.create(null), pulse = { jump: false, dive: false }, touch = { mx: 0, mz: 0, fire: false };
 const KEYMAP = { KeyW: 'up', ArrowUp: 'up', KeyS: 'down', ArrowDown: 'down', KeyA: 'left', ArrowLeft: 'left', KeyD: 'right', ArrowRight: 'right', KeyF: 'fire', KeyJ: 'fire' };
-const clearInput = () => { for (const k in keys) keys[k] = false; pulse.jump = pulse.dive = false; touch.mx = touch.mz = 0; touch.fire = false; };
+const clearInput = () => { for (const k in keys) keys[k] = false; pulse.jump = pulse.dive = predictedPulse.jump = predictedPulse.dive = false; touch.mx = touch.mz = 0; touch.fire = false; };
 
 window.addEventListener('keydown', e => {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -472,6 +472,8 @@ function onEvent(e) {
    the local clock; my player is predicted locally and smoothly corrected toward the
    server. Fixed 1/60 sub-steps match the server's h. See README §10. */
 const INTERP_DELAY = 0.1, SIM_STEP = 1 / 60;
+// Network pulses are sent immediately; local pulses survive render-only frames.
+const predictedPulse = { jump: false, dive: false };
 // Adaptive interpolation delay: instead of a fixed 100 ms, the render delay
 // eases toward a target that tracks arrival jitter. The arrival-aligned
 // sim clock already includes downlink transit; adding RTT/2 here counts it twice.
@@ -535,6 +537,7 @@ function resetNet() {
   netMine = null; netMineDead = false; lastNetPhase = ''; needHardSnapMe = false;
   simAcc = 0; lastSentInp = null; lastSentAt = 0; lastInpAt = 0;
   pendingFallStamp = null; lastJumpStamp = 0;
+  predictedPulse.jump = predictedPulse.dive = false;
   lastDiveStamp = 0; lastFireStamp = 0; lastPickupStamp = 0;
   interpDelay = INTERP_DELAY; interpTarget = INTERP_DELAY; srvOffset = null;
   evQueue.length = 0;
@@ -880,12 +883,22 @@ function update(dt, t) {
     const input = playing ? readInput() : null;
     if (isMP) {
       const stampT = performance.now() / 1000;  // this frame's input stamp (monotonic)
-      if (playing) sendMPInput(input, stampT);
+      if (playing) {
+        sendMPInput(input, stampT);
+        predictedPulse.jump = predictedPulse.jump || input.jump;
+        predictedPulse.dive = predictedPulse.dive || input.dive;
+      }
       const remotes = applyNet(dt);
       // fixed 1/60 steps so the local sim's sub-step size matches the server's
       simAcc += dt;
       let n = 0;
-      while (simAcc >= SIM_STEP && n < 10) { sim.step(SIM_STEP, input); simAcc -= SIM_STEP; n++; }
+      while (simAcc >= SIM_STEP && n < 10) {
+        const stepInput = input ? { ...input, jump: predictedPulse.jump, dive: predictedPulse.dive } : null;
+        sim.step(SIM_STEP, stepInput);
+        // Consume once per physics tick, never on a frame with zero ticks.
+        predictedPulse.jump = predictedPulse.dive = false;
+        simAcc -= SIM_STEP; n++;
+      }
       if (n >= 10) simAcc = 0;  // drop backlog instead of spiral-of-death
       // where we predict ourselves to be, on the wall clock; reconcileOwn() compares server samples with this
       const pm = sim.players[me];
